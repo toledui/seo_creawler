@@ -1,0 +1,47 @@
+# Servidor web de SEO Crawler (Next.js).
+#
+# Sustituye __PORT__ por el puerto que hayas elegido y ajusta rutas y usuario
+# si no despliegas en /var/www/seocrawler.
+#
+#   sudo cp deploy/systemd/seocrawler-*.service /etc/systemd/system/
+#   sudo sed -i 's/__PORT__/3210/' /etc/systemd/system/seocrawler-web.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now seocrawler-web seocrawler-worker
+
+[Unit]
+Description=SEO Crawler (web)
+# En un VPS compartido la base puede ser local o remota; si es local conviene
+# esperar a que arranque.
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=seocrawler
+Group=seocrawler
+WorkingDirectory=/var/www/seocrawler
+
+Environment=NODE_ENV=production
+EnvironmentFile=/var/www/seocrawler/.env
+
+# `-H 127.0.0.1` va como argumento y no como variable de entorno a propósito:
+# `next start` sólo lee PORT del entorno, el host no. Sin este flag escucharía
+# en 0.0.0.0 y la app quedaría accesible por IP:puerto saltándose el TLS.
+ExecStart=/usr/bin/npm run start -- -H 127.0.0.1 -p __PORT__
+
+Restart=always
+RestartSec=5
+
+# Aislamiento: no puede tocar el resto del VPS.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/www/seocrawler
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=seocrawler-web
+
+[Install]
+WantedBy=multi-user.target

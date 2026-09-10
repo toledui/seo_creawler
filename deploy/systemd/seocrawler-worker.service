@@ -1,0 +1,46 @@
+# Worker de SEO Crawler: rastreos, análisis y tracking diario de keywords.
+#
+# Va en un proceso aparte del web a propósito. Un crawl largo consume CPU y
+# red durante minutos; si compartiera proceso con el servidor, la interfaz se
+# quedaría pillada mientras rastrea.
+#
+# No lo escales a varias instancias sin querer: la cola reparte los crawls con
+# un bloqueo por fila (workerId + heartbeatAt), así que varios workers son
+# seguros, pero cada uno rastrea en paralelo y multiplica el consumo del VPS.
+
+[Unit]
+Description=SEO Crawler (worker)
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=seocrawler
+Group=seocrawler
+WorkingDirectory=/var/www/seocrawler
+
+Environment=NODE_ENV=production
+EnvironmentFile=/var/www/seocrawler/.env
+
+ExecStart=/usr/bin/npm run worker
+
+Restart=always
+RestartSec=10
+
+# En un VPS compartido conviene que el crawler no ahogue a los demás
+# proyectos. Ajusta según los núcleos y la RAM que tengas.
+CPUWeight=50
+MemoryMax=1G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/www/seocrawler
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=seocrawler-worker
+
+[Install]
+WantedBy=multi-user.target

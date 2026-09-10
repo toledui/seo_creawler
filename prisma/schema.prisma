@@ -1,0 +1,727 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------- Auth
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+model User {
+  id           String  @id @default(cuid())
+  email        String  @unique
+  name         String?
+  /// Vacio mientras la cuenta no haya establecido su contrasena por invitacion
+  passwordHash String?
+
+  role     Role    @default(MEMBER)
+  isActive Boolean @default(true)
+
+  invitedById String?
+  lastLoginAt DateTime?
+
+  projects    Project[]
+  resetTokens PasswordResetToken[]
+  settings    UserSettings?
+  gscAccount  GscAccount?
+
+  /// Personas invitadas a MI espacio de trabajo
+  teamMembers AccountMember[] @relation("AccountOwner")
+  /// Espacios de trabajo ajenos a los que tengo acceso
+  memberships AccountMember[] @relation("AccountMembership")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Permisos dentro de un espacio de trabajo.
+enum AccountRole {
+  /// Acceso total, incluido gestionar el equipo
+  OWNER
+  /// Puede crear proyectos, lanzar crawls y generar informes
+  EDITOR
+  /// Sólo lectura: ve datos e informes, no puede modificar nada
+  VIEWER
+}
+
+/// Acceso de una persona al espacio de trabajo de otra.
+///
+/// No hay una tabla `Account` aparte: el espacio de trabajo es el propio
+/// usuario dueño de los proyectos, y esta tabla dice quién más entra y con
+/// qué permisos. Así los proyectos siguen colgando de `Project.userId` y
+/// no hace falta reescribir todo el modelo.
+model AccountMember {
+  id String @id @default(cuid())
+
+  /// Dueño del espacio de trabajo
+  ownerId String
+  owner   User   @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  /// Persona invitada
+  userId String
+  user   User   @relation("AccountMembership", fields: [userId], references: [id], onDelete: Cascade)
+
+  role AccountRole @default(VIEWER)
+
+  invitedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([ownerId, userId])
+  @@index([userId])
+  @@index([ownerId])
+}
+
+/// Ajustes propios de cada cuenta (tenant).
+///
+/// La clave de IA vive aqui y no en la configuracion global: cada cuenta
+/// paga y gestiona su propio consumo.
+model UserSettings {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Cifrada en reposo (AES-256-GCM)
+  deepseekApiKey  String? @db.Text
+  deepseekModel   String?
+  deepseekBaseUrl String?
+
+  /// Recibir por correo el resumen al terminar un crawl
+  emailOnCrawlComplete Boolean @default(false)
+  /// Recibir por correo las auditorias de IA al generarse
+  emailOnAiReport      Boolean @default(false)
+  /// Direccion alternativa para los envios; si es null se usa la de la cuenta
+  notifyEmail          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Conexion de Google a nivel de cuenta.
+///
+/// El OAuth se autoriza una sola vez por cuenta; cada proyecto elige
+/// despues cual de sus propiedades de Search Console usa.
+model GscAccount {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Cifrados en reposo
+  refreshToken String?   @db.Text
+  accessToken  String?   @db.Text
+  expiresAt    DateTime?
+
+  googleEmail String?
+  lastError   String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Configuracion global de la instancia, editable desde el panel de admin.
+/// Los valores marcados como secretos se guardan cifrados.
+model AppSetting {
+  key       String   @id @db.VarChar(64)
+  value     String?  @db.LongText
+  isSecret  Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+model PasswordResetToken {
+  id     String @id @default(cuid())
+  token  String @unique
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// INVITE (alta de cuenta) | RESET (olvide mi contrasena)
+  purpose String @default("RESET") @db.VarChar(16)
+
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------- Projects
+
+model Project {
+  id        String   @id @default(cuid())
+  name      String
+  domain    String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  crawls    Crawl[]
+
+  /// Propiedad de Search Console que mide este proyecto (la autorizacion
+  /// vive en GscAccount, a nivel de cuenta).
+  gscSiteUrl String? @db.Text
+
+  // ---- Serplify (posicion real en el SERP)
+  /// Medir posiciones con Serplify ademas de con Search Console
+  serpTrackingEnabled Boolean @default(false)
+  /// Codigo de geo de Google (2840 = Estados Unidos)
+  serpLocationCode    Int     @default(2724)
+  serpLanguageCode    String  @default("es") @db.VarChar(8)
+  /// desktop | mobile
+  serpDevice          String  @default("desktop") @db.VarChar(16)
+  /// ISO del país cuyo listado de ubicaciones se muestra en los ajustes.
+  serpCountry         String  @default("ES") @db.VarChar(2)
+  /// Dominio a seguir; si es null se deriva de `domain`
+  serpTarget          String? @db.VarChar(255)
+
+  keywords       Keyword[]
+  keywordImports KeywordImport[]
+  trackingJobs   TrackingJob[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------- Crawls
+
+enum CrawlStatus {
+  PENDING
+  QUEUED
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model Crawl {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  status CrawlStatus @default(PENDING)
+
+  // Configuracion
+  startUrl         String  @db.Text
+  maxUrls          Int     @default(10000)
+  maxDepth         Int     @default(10)
+  concurrency      Int     @default(10)
+  delayMs          Int     @default(100)
+  respectRobots    Boolean @default(true)
+  followSubdomains Boolean @default(false)
+  followNofollow   Boolean @default(false)
+  userAgent        String? @db.Text
+  includePatterns  String? @db.Text
+  excludePatterns  String? @db.Text
+  useSitemaps      Boolean @default(true)
+
+  // Progreso
+  discoveredUrls Int @default(0)
+  crawledUrls    Int @default(0)
+  failedUrls     Int @default(0)
+
+  // Control cooperativo del worker (sin Redis)
+  controlSignal String?
+  /// El worker borra los datos previos antes de rastrear (re-crawl limpio)
+  resetRequested Boolean @default(false)
+  workerId      String?
+  heartbeatAt   DateTime?
+  errorMessage  String?   @db.Text
+
+  // Metricas agregadas al finalizar
+  stats Json?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  pages         Page[]
+  links         Link[]
+  issues        Issue[]
+  reports       AiReport[]
+  events        CrawlEvent[]
+  sitemapUrls   SitemapUrl[]
+  conversations AiConversation[]
+  frontier      FrontierUrl[]
+  exports       Export[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model CrawlEvent {
+  id        BigInt   @id @default(autoincrement())
+  crawlId   String
+  crawl     Crawl    @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+  level     String   @default("info")
+  event     String
+  message   String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([crawlId])
+}
+
+model SitemapUrl {
+  id            BigInt   @id @default(autoincrement())
+  crawlId       String
+  crawl         Crawl    @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+  url           String   @db.Text
+  normalizedUrl String   @db.Text
+  urlHash       String   @db.VarChar(64)
+  sitemap       String?  @db.Text
+  createdAt     DateTime @default(now())
+
+  @@unique([crawlId, urlHash])
+  @@index([crawlId])
+}
+
+// ---------------------------------------------------------------- Pages
+
+model Page {
+  id      BigInt @id @default(autoincrement())
+  crawlId String
+  crawl   Crawl  @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  url           String @db.Text
+  normalizedUrl String @db.Text
+  urlHash       String @db.VarChar(64)
+
+  finalUrl    String? @db.Text
+  redirectUrl String? @db.Text
+
+  statusCode    Int?
+  contentType   String?
+  responseTime  Int?
+  contentLength Int?
+
+  errorType String?
+
+  title       String? @db.Text
+  titleLength Int?
+
+  metaDescription       String? @db.Text
+  metaDescriptionLength Int?
+
+  h1      String? @db.Text
+  h1Count Int     @default(0)
+  h2Count Int     @default(0)
+
+  canonical  String? @db.Text
+  metaRobots String? @db.Text
+  xRobotsTag String? @db.Text
+
+  wordCount Int     @default(0)
+  language  String?
+
+  indexable          Boolean @default(true)
+  indexabilityReason String  @default("INDEXABLE")
+
+  depth          Int     @default(0)
+  discoveredFrom String? @db.Text
+  discoveryType  String  @default("LINK")
+
+  internalInlinks  Int @default(0)
+  uniqueInlinks    Int @default(0)
+  internalOutlinks Int @default(0)
+  uniqueOutlinks   Int @default(0)
+  externalOutlinks Int @default(0)
+  imagesCount      Int @default(0)
+  imagesMissingAlt Int @default(0)
+
+  internalPageRank Float?
+  betweenness      Float?
+  hubScore         Float?
+  authorityScore   Float?
+  clusterId        Int?
+
+  inSitemap       Boolean @default(false)
+  potentialOrphan Boolean @default(false)
+
+  directory   String? @db.VarChar(255)
+  contentHash String? @db.VarChar(64)
+  simhash     String? @db.VarChar(20)
+
+  geoSignals Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sourceLinks Link[]         @relation("SourcePage")
+  targetLinks Link[]         @relation("TargetPage")
+  headings    Heading[]
+  images      ImageAsset[]
+  schemas     SchemaMarkup[]
+  hreflangs   Hreflang[]
+
+  @@unique([crawlId, urlHash])
+  @@index([crawlId])
+  @@index([crawlId, statusCode])
+  @@index([crawlId, indexable])
+  @@index([crawlId, depth])
+  @@index([crawlId, internalPageRank])
+  @@index([crawlId, clusterId])
+  @@index([crawlId, simhash])
+}
+
+model Heading {
+  id     BigInt @id @default(autoincrement())
+  pageId BigInt
+  page   Page   @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  level  Int
+  text   String @db.Text
+  order  Int    @default(0)
+
+  @@index([pageId])
+}
+
+model ImageAsset {
+  id      BigInt  @id @default(autoincrement())
+  pageId  BigInt
+  page    Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  src     String  @db.Text
+  alt     String? @db.Text
+  width   Int?
+  height  Int?
+  loading String?
+
+  @@index([pageId])
+}
+
+model SchemaMarkup {
+  id         BigInt  @id @default(autoincrement())
+  pageId     BigInt
+  page       Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  schemaType String? @db.VarChar(191)
+  rawJson    String  @db.LongText
+  validJson  Boolean @default(true)
+
+  @@index([pageId])
+  @@index([schemaType])
+}
+
+model Hreflang {
+  id       BigInt @id @default(autoincrement())
+  pageId   BigInt
+  page     Page   @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  href     String @db.Text
+  language String @db.VarChar(32)
+
+  @@index([pageId])
+}
+
+// ---------------------------------------------------------------- Links
+
+enum LinkType {
+  INTERNAL
+  EXTERNAL
+}
+
+model Link {
+  id BigInt @id @default(autoincrement())
+
+  crawlId String
+  crawl   Crawl  @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  sourcePageId BigInt
+  sourcePage   Page   @relation("SourcePage", fields: [sourcePageId], references: [id], onDelete: Cascade)
+
+  targetPageId BigInt?
+  targetPage   Page?   @relation("TargetPage", fields: [targetPageId], references: [id])
+
+  targetUrl  String @db.Text
+  targetHash String @db.VarChar(64)
+
+  anchorText String? @db.Text
+  rel        String? @db.VarChar(191)
+  linkType   LinkType
+  follow     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@index([crawlId])
+  @@index([sourcePageId])
+  @@index([targetPageId])
+  @@index([crawlId, targetHash])
+}
+
+// ---------------------------------------------------------------- Issues
+
+enum IssueSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Issue {
+  id BigInt @id @default(autoincrement())
+
+  crawlId String
+  crawl   Crawl  @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  pageId BigInt?
+  url    String? @db.Text
+
+  code     String        @db.VarChar(64)
+  severity IssueSeverity
+
+  title   String  @db.VarChar(191)
+  details String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([crawlId])
+  @@index([crawlId, code])
+  @@index([crawlId, severity])
+  @@index([pageId])
+}
+
+// ---------------------------------------------------------------- IA
+
+model AiReport {
+  id      String @id @default(cuid())
+  crawlId String
+  crawl   Crawl  @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  model String
+  type  String @default("audit")
+
+  input  Json?
+  output Json?
+
+  error     String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([crawlId])
+}
+
+model AiConversation {
+  id        String      @id @default(cuid())
+  crawlId   String
+  crawl     Crawl       @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+  title     String?
+  messages  AiMessage[]
+  createdAt DateTime    @default(now())
+
+  @@index([crawlId])
+}
+
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String
+  content        String         @db.LongText
+  toolCalls      Json?
+  createdAt      DateTime       @default(now())
+
+  @@index([conversationId])
+}
+
+// ---------------------------------------------------------------- Frontera
+
+/// Cola BFS persistida: permite pausar un crawl y reanudarlo donde iba
+/// en lugar de volver a empezar desde la Start URL.
+model FrontierUrl {
+  id      BigInt @id @default(autoincrement())
+  crawlId String
+  crawl   Crawl  @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  url            String @db.Text
+  urlHash        String @db.VarChar(64)
+  depth          Int    @default(0)
+  discoveredFrom String? @db.Text
+  discoveryType  String  @default("LINK")
+
+  /// PENDING | DONE
+  state     String   @default("PENDING") @db.VarChar(16)
+  createdAt DateTime @default(now())
+
+  @@unique([crawlId, urlHash])
+  @@index([crawlId, state, depth])
+}
+
+// ---------------------------------------------------------------- Exports
+
+model Export {
+  id      String @id @default(cuid())
+  crawlId String
+  crawl   Crawl  @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  type     String @db.VarChar(40)
+  filename String @db.VarChar(191)
+  rows     Int    @default(0)
+  bytes    Int    @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([crawlId])
+}
+
+// ---------------------------------------------------------------- Keywords
+
+model Keyword {
+  id        BigInt  @id @default(autoincrement())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  keyword       String  @db.VarChar(255)
+  normalized    String  @db.VarChar(255)
+  country       String  @default("esp") @db.VarChar(8)
+  device        String  @default("ALL") @db.VarChar(16)
+  /// MANUAL | CSV | GSC
+  source        String  @default("MANUAL") @db.VarChar(16)
+  tags          String? @db.VarChar(255)
+  targetUrl     String? @db.Text
+  /// Se sigue midiendo a diario o no
+  tracked       Boolean @default(true)
+
+  // Ultimo valor conocido, desnormalizado para poder listar y ordenar barato
+  lastPosition    Float?
+  bestPosition    Float?
+  previousPosition Float?
+  lastClicks      Int?
+  lastImpressions Int?
+  lastCtr         Float?
+  lastUrl         String? @db.Text
+  lastCheckedAt   DateTime?
+
+  // ---- Posicion real medida en el SERP (Serplify), aparte de la de GSC
+  serpPosition         Float?
+  serpPreviousPosition Float?
+  serpBestPosition     Float?
+  serpUrl              String?   @db.Text
+  serpCheckedAt        DateTime?
+
+  rankings KeywordRanking[]
+  serpChecks SerpCheck[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, normalized, country, device])
+  @@index([projectId])
+  @@index([projectId, tracked])
+  @@index([projectId, lastPosition])
+}
+
+/// Una fila por keyword y dia: el historico del que salen las graficas.
+model KeywordRanking {
+  id        BigInt  @id @default(autoincrement())
+  keywordId BigInt
+  keyword   Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  date        DateTime @db.Date
+  position    Float?
+  clicks      Int      @default(0)
+  impressions Int      @default(0)
+  ctr         Float    @default(0)
+  url         String?  @db.Text
+  source      String   @default("GSC") @db.VarChar(16)
+
+  createdAt DateTime @default(now())
+
+  @@unique([keywordId, date])
+  @@index([keywordId, date])
+}
+
+/// Foto del SERP para una keyword en un momento dado.
+///
+/// Guarda la posicion propia y el top de resultados, de modo que se puede
+/// ver quien rankea por encima sin volver a pagar la consulta.
+model SerpCheck {
+  id        BigInt  @id @default(autoincrement())
+  keywordId BigInt
+  keyword   Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  /// Dia de la medicion (una por keyword y dia)
+  date DateTime @db.Date
+
+  locationCode Int
+  languageCode String @db.VarChar(8)
+  device       String @db.VarChar(16)
+
+  /// Posicion absoluta (contando bloques) y dentro de los organicos
+  rankAbsolute Int?
+  rankGroup    Int?
+  /// URL propia que aparece en el SERP
+  url          String? @db.Text
+  found        Boolean @default(false)
+
+  /// Bloques presentes: organic, people_also_ask, local_pack, featured_snippet...
+  featureTypes String? @db.Text
+  /// Top de resultados organicos: [{ rank, domain, url, title }]
+  topResults   Json?
+
+  totalResults BigInt?
+  /// Coste real informado por la API, para poder auditar el gasto
+  costUsd      Float   @default(0)
+  requestId    String? @db.VarChar(64)
+
+  createdAt DateTime @default(now())
+
+  @@unique([keywordId, date])
+  @@index([keywordId, date])
+}
+
+/// Lote de importacion (CSV o sincronizacion GSC) para poder auditar.
+model KeywordImport {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// CSV | GSC
+  source   String @db.VarChar(16)
+  filename String? @db.VarChar(191)
+
+  /// PENDING | RUNNING | COMPLETED | FAILED
+  status   String @default("PENDING") @db.VarChar(16)
+
+  totalRows   Int @default(0)
+  createdRows Int @default(0)
+  updatedRows Int @default(0)
+  skippedRows Int @default(0)
+
+  error     String?  @db.Text
+  createdAt DateTime @default(now())
+  finishedAt DateTime?
+
+  @@index([projectId])
+}
+
+/// Trabajo diario de tracking. El worker lo consume a ritmo controlado
+/// para no saturar ni el servidor ni la cuota de la API.
+model TrackingJob {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// Dia que se esta midiendo
+  date DateTime @db.Date
+
+  /// PENDING | RUNNING | COMPLETED | FAILED | SKIPPED
+  status String @default("PENDING") @db.VarChar(16)
+
+  keywordsTotal     Int @default(0)
+  keywordsProcessed Int @default(0)
+
+  workerId    String?
+  heartbeatAt DateTime?
+  error       String?   @db.Text
+
+  scheduledFor DateTime
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@unique([projectId, date])
+  @@index([status, scheduledFor])
+}
