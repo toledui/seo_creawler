@@ -44,12 +44,12 @@ module.exports = {
       name: 'seocrawler-web',
       namespace: 'seocrawler',
       cwd: ROOT,
+      ...interpreter,
 
       // Se apunta al binario de Next en lugar de a `npm run start` a
       // propósito: con npm de por medio queda un proceso intermedio que se
       // traga las señales, y `pm2 restart` acaba matando el padre y dejando
       // huérfano al servidor.
-      ...interpreter,
       script: './node_modules/next/dist/bin/next',
 
       // `-H 127.0.0.1` es obligatorio: Next lee el puerto de la variable
@@ -81,11 +81,11 @@ module.exports = {
       name: 'seocrawler-worker',
       namespace: 'seocrawler',
       cwd: ROOT,
+      ...interpreter,
 
       // El worker es TypeScript y se ejecuta con tsx, que está en
       // devDependencies: si despliegas con `npm ci --omit=dev` este proceso
       // no arranca y no se rastrea nada.
-      ...interpreter,
       script: './node_modules/tsx/dist/cli.mjs',
       args: 'src/workers/crawl-worker.ts',
 
