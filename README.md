@@ -61,10 +61,11 @@ puerto 3000, ni el usuario root de MySQL.
 deploy/
 ├── check-ports.sh                 # qué está ocupado y qué puerto libre usar
 ├── .env.production.example        # plantilla de .env para producción
+├── ecosystem.config.js            # pm2: los dos procesos
 ├── nginx/seocrawler.conf          # server block, con __DOMAIN__ y __PORT__
-└── systemd/
-    ├── seocrawler-web.service     # servidor Next
-    └── seocrawler-worker.service  # rastreos y tracking
+└── systemd/                       # alternativa a pm2
+    ├── seocrawler-web.service
+    └── seocrawler-worker.service
 ```
 
 ### 0. Antes de nada: ver qué hay ocupado
@@ -98,6 +99,7 @@ proyecto:
 
 ```bash
 ls /etc/nginx/sites-available/ | grep -i seo
+pm2 list | grep -i seo
 systemctl list-unit-files | grep -i seocrawler
 id seocrawler
 sudo mysql -e "SHOW DATABASES" | grep -i seo
@@ -107,13 +109,26 @@ Si alguno existe, renómbralo en todos los ficheros antes de seguir.
 
 ### 1. Dependencias del sistema
 
-Node 20 o superior y MariaDB 10.6+ (o MySQL 8). Si el VPS ya tiene una versión
-de Node antigua para otro proyecto, **no la sustituyas**: instala la nueva con
-`nvm` bajo el usuario `seocrawler` y apunta los `ExecStart` de systemd a esa
-ruta en lugar de a `/usr/bin/npm`.
+Node 20 o superior y MariaDB 10.6+ (o MySQL 8).
 
 ```bash
 sudo apt update && sudo apt install -y nginx mariadb-server git curl iproute2
+```
+
+**Cuidado con la versión de Node si el VPS ya usa pm2.** pm2 arranca los
+procesos con el Node con el que se lanzó el demonio, no con el que tengas en
+tu shell. Compruébalo:
+
+```bash
+pm2 list && node -v && pm2 prettylist | grep -m1 node_version
+```
+
+Si el demonio corre con un Node anterior al 20, **no lo actualices para todos**
+—romperías los otros proyectos—. Descomenta la línea `interpreter` en
+`deploy/ecosystem.config.js` y apúntala a la ruta del Node nuevo:
+
+```bash
+which node    # p. ej. /home/seocrawler/.nvm/versions/node/v20.18.0/bin/node
 ```
 
 ### 2. Base de datos propia
@@ -148,11 +163,80 @@ sudo chmod 600 /var/www/seocrawler/.env
 cd /var/www/seocrawler && sudo -u seocrawler npm ci && sudo -u seocrawler npx prisma db push && sudo -u seocrawler npm run build
 ```
 
+**`npm ci` a secas, sin `--omit=dev`.** El worker y los comandos de
+administración se ejecutan con `tsx`, que está en `devDependencies`: si podas
+las dependencias de desarrollo, `seocrawler-worker` no arranca y no se rastrea
+nada.
+
 `AUTH_SECRET` se genera con `openssl rand -base64 48`. **Guárdalo aparte**:
 además de firmar la sesión, cifra las claves de Serplify, DeepSeek, Google y
 SMTP guardadas en la base. Si se pierde, hay que reintroducirlas todas.
 
-### 4. Servicios
+### 4. Servicios (pm2)
+
+Son **dos** procesos a propósito: un crawl consume CPU y red durante minutos y,
+en el mismo proceso que el servidor, dejaría la interfaz colgada.
+
+Ajusta el puerto en `deploy/ecosystem.config.js` (constante `PORT`, o la
+variable `SEOCRAWLER_PORT`) y arranca:
+
+```bash
+cd /var/www/seocrawler && mkdir -p logs && pm2 start deploy/ecosystem.config.js
+```
+
+```bash
+pm2 save
+```
+
+`pm2 save` guarda la lista para que sobreviva a un reinicio del VPS. Si pm2 ya
+gestiona otros proyectos, el arranque automático (`pm2 startup`) ya estará
+configurado y no hay que tocarlo.
+
+**En un servidor compartido, nunca estos comandos:**
+
+```
+pm2 delete all      pm2 kill      pm2 stop all      pm2 restart all
+```
+
+Se llevarían por delante los procesos de los demás proyectos. Los dos procesos
+de esta app van bajo el namespace `seocrawler`, así que actúa sólo sobre él:
+
+| Acción | Comando |
+| --- | --- |
+| Ver sólo estos procesos | `pm2 list --namespace seocrawler` |
+| Reiniciar los dos | `pm2 restart /seocrawler` |
+| Pararlos | `pm2 stop /seocrawler` |
+| Borrarlos de pm2 | `pm2 delete /seocrawler` |
+| Logs en vivo | `pm2 logs seocrawler-worker` |
+| Consumo | `pm2 monit` |
+
+Detalles de la configuración que no son arbitrarios:
+
+- **Se apunta a los binarios, no a `npm run`.** Con npm de por medio queda un
+  proceso intermedio que se traga las señales, y `pm2 restart` acaba matando al
+  padre y dejando huérfano al servidor.
+- **`-H 127.0.0.1` como argumento.** `next start` lee el puerto de la variable
+  `PORT` pero **el host no**: sin ese flag escucharía en `0.0.0.0` y la app
+  quedaría accesible por `IP:puerto` sin pasar por nginx ni por el TLS.
+- **`exec_mode: fork` con una sola instancia.** El modo cluster no aporta aquí
+  —quien encaja el tráfico es nginx— y en el worker sería contraproducente:
+  cada instancia rastrearía en paralelo y multiplicaría el consumo del VPS.
+- **`max_memory_restart: 1G` en el worker.** Un rastreo grande carga el grafo
+  del sitio en memoria para calcular PageRank y comunidades. Si se dispara,
+  mejor reiniciarlo que dejar sin RAM a los demás proyectos.
+- **`kill_timeout: 15000`.** Los crawls son largos; hay que darle margen para
+  cerrar antes de que pm2 lo mate a la fuerza.
+- **No hace falta `env_file`.** Next carga el `.env` por su cuenta y el worker
+  lo hace con `loadEnv()`. Eso sí, ambos lo buscan **relativo al directorio de
+  trabajo**, así que `cwd` en el ecosystem tiene que apuntar a la raíz del
+  proyecto.
+
+<details>
+<summary>Alternativa: systemd, si prefieres no usar pm2</summary>
+
+En `deploy/systemd/` hay dos units equivalentes. Systemd añade `CPUWeight` y
+`MemoryMax`, que pm2 no ofrece, para que un rastreo no ahogue al resto del
+servidor. No mezcles los dos gestores en la misma máquina.
 
 ```bash
 sudo cp deploy/systemd/seocrawler-*.service /etc/systemd/system/
@@ -166,16 +250,7 @@ sudo sed -i 's/__PORT__/3210/' /etc/systemd/system/seocrawler-web.service
 sudo systemctl daemon-reload && sudo systemctl enable --now seocrawler-web seocrawler-worker
 ```
 
-Son dos procesos a propósito: un crawl consume CPU y red durante minutos y, en
-el mismo proceso que el servidor, dejaría la interfaz colgada.
-
-El web escucha en `127.0.0.1` porque la unit pasa `-H 127.0.0.1` como
-argumento. Tiene que ir así: `next start` lee el puerto de la variable `PORT`
-pero **el host no**, y sin el flag escucharía en `0.0.0.0`, quedando accesible
-por `IP:puerto` sin pasar por nginx ni por el TLS.
-
-El worker lleva `CPUWeight=50` y `MemoryMax=1G` para que un rastreo grande no
-ahogue a los demás proyectos del VPS. Ajústalo a tu máquina.
+</details>
 
 ### 5. nginx
 
@@ -224,27 +299,71 @@ curl -I https://seo.tudominio.com/login
 ```
 
 ```bash
-journalctl -u seocrawler-web -n 50 --no-pager
+pm2 list --namespace seocrawler
 ```
 
 ```bash
-journalctl -u seocrawler-worker -f
+pm2 logs seocrawler-worker --lines 50
 ```
 
-Crea el primer administrador:
+### 8. Crear el primer usuario
+
+Hay dos caminos y ambos crean una cuenta **administradora**.
+
+**Por el navegador (lo más rápido).** Mientras no exista ninguna cuenta, y sólo
+mientras no exista, `/register` está abierto:
+
+```
+https://seo.tudominio.com/register
+```
+
+Rellenas correo, nombre y contraseña, y entras con la sesión ya iniciada. En
+cuanto existe una cuenta esa ruta devuelve 403 para siempre: el resto de altas
+salen del panel de administración.
+
+**Por línea de comandos**, si prefieres no exponer `/register` ni un momento.
+Fija la contraseña directamente:
 
 ```bash
-cd /var/www/seocrawler && sudo -u seocrawler npm run admin
+cd /var/www/seocrawler && sudo -u seocrawler npm run admin -- create admin@tudominio.com "Tu Nombre"
 ```
 
-Y en **Administración → Google**, añade como URI de redirección autorizada
+Ese comando crea la cuenta **sin contraseña** e imprime un enlace de invitación
+válido 72 h para establecerla. El enlace se construye con `NEXTAUTH_URL`, así
+que si esa variable está mal el enlace apuntará a `localhost`.
+
+Si prefieres poner la contraseña de una vez, sin enlace:
+
+```bash
+cd /var/www/seocrawler && sudo -u seocrawler npm run admin -- password admin@tudominio.com 'UnaClaveLargaYSegura'
+```
+
+Comilla simple alrededor de la contraseña para que el shell no interprete `$`,
+`!` ni `#`. Y ten en cuenta que queda en el historial: bórralo después con
+`history -d` o antepón un espacio al comando.
+
+Para comprobar qué cuentas hay:
+
+```bash
+cd /var/www/seocrawler && sudo -u seocrawler npm run admin -- list
+```
+
+El resto de comandos (`promote`, `reset`) están en la sección
+*[Recuperación por línea de comandos](#recuperación-por-línea-de-comandos)*.
+
+### 9. Último paso: Google
+
+En **Administración → Google**, añade como URI de redirección autorizada
 `https://seo.tudominio.com/api/auth/google/callback`.
 
 ### Actualizar
 
 ```bash
-cd /var/www/seocrawler && sudo -u seocrawler git pull && sudo -u seocrawler npm ci && sudo -u seocrawler npx prisma db push && sudo -u seocrawler npm run build && sudo systemctl restart seocrawler-web seocrawler-worker
+cd /var/www/seocrawler && sudo -u seocrawler git pull && sudo -u seocrawler npm ci && sudo -u seocrawler npx prisma db push && sudo -u seocrawler npm run build && pm2 restart /seocrawler
 ```
+
+`pm2 restart /seocrawler` reinicia sólo los dos procesos de esta app. Con
+`pm2 restart all` reiniciarías también los de los demás proyectos del VPS.
 
 Reinicia el worker **después** del build: si se queda con el código viejo
 mientras la base ya tiene el esquema nuevo, los rastreos fallan.
