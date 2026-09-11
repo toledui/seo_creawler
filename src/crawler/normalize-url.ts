@@ -67,6 +67,10 @@ export function normalizeUrl(url: string, baseUrl?: string): string | null {
   if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) return null;
   if (!parsed.hostname) return null;
 
+  // Endpoints internos de Cloudflare (email-protection, challenge-platform, trace…):
+  // los reescribe el proxy en el HTML y solo funcionan con su JS, no son páginas reales.
+  if (parsed.pathname.toLowerCase().startsWith('/cdn-cgi/')) return null;
+
   parsed.hash = '';
   parsed.hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
   parsed.protocol = parsed.protocol.toLowerCase();
