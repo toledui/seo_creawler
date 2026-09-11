@@ -177,8 +177,9 @@ SMTP guardadas en la base. Si se pierde, hay que reintroducirlas todas.
 Son **dos** procesos a propósito: un crawl consume CPU y red durante minutos y,
 en el mismo proceso que el servidor, dejaría la interfaz colgada.
 
-Ajusta el puerto en `deploy/ecosystem.config.js` (constante `PORT`, o la
-variable `SEOCRAWLER_PORT`) y arranca:
+Pon el puerto en el `.env` (`SEOCRAWLER_PORT`, y `SEOCRAWLER_NODE` si pm2 debe
+usar otro Node). No edites `deploy/ecosystem.config.js` en el servidor: está en
+git y bloquearía los `git pull`. Después arranca:
 
 ```bash
 cd /var/www/seocrawler && mkdir -p logs && pm2 start deploy/ecosystem.config.js

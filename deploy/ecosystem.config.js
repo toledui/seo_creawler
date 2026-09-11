@@ -18,23 +18,49 @@
  *   pm2 delete  /seocrawler
  */
 
-// Puerto local de la app. Elígelo con deploy/check-ports.sh y cámbialo aquí.
-const PORT = process.env.SEOCRAWLER_PORT || '3210';
+const fs = require('node:fs');
+const path = require('node:path');
 
 // Raíz del despliegue. Tiene que ser la carpeta del proyecto: tanto Next como
 // el worker leen el `.env` relativo al directorio de trabajo.
 const ROOT = '/var/www/seocrawler';
 
 /**
+ * Lo propio de cada servidor (puerto, Node) va en el `.env`, que no está en
+ * git: así este archivo no se edita en el VPS y `git pull` no choca con él.
+ * Parser mínimo a propósito: pm2 carga este archivo antes de que haya
+ * dependencias garantizadas.
+ */
+function readDotEnv(file) {
+  try {
+    const vars = {};
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const match = line.match(/^\s*([\w.]+)\s*=\s*(.*?)\s*$/);
+      if (match) vars[match[1]] = match[2].replace(/^(['"])(.*)\1$/, '$2');
+    }
+    return vars;
+  } catch {
+    return {};
+  }
+}
+
+const dotEnv = readDotEnv(path.join(ROOT, '.env'));
+const setting = (name) => process.env[name] || dotEnv[name] || undefined;
+
+// Puerto local de la app. Elígelo con deploy/check-ports.sh y ponlo en el
+// `.env` como SEOCRAWLER_PORT.
+const PORT = setting('SEOCRAWLER_PORT') || '3210';
+
+/**
  * Node con el que ejecutar los dos procesos.
  *
  * pm2 usa por defecto el Node con el que se lanzó el demonio, que en un VPS
- * con proyectos antiguos puede ser una versión anterior a la 20. Descomenta
- * y pon la ruta del Node nuevo (`which node`) sin actualizar el del sistema,
- * que rompería a los demás.
+ * con proyectos antiguos puede ser una versión anterior a la 20. Pon la ruta
+ * del Node nuevo (`which node`) en el `.env` como SEOCRAWLER_NODE, sin
+ * actualizar el del sistema, que rompería a los demás. Ejemplo:
+ *   SEOCRAWLER_NODE="/home/seocrawler/.nvm/versions/node/v20.18.0/bin/node"
  */
-// const NODE = '/home/seocrawler/.nvm/versions/node/v20.18.0/bin/node';
-const NODE = undefined;
+const NODE = setting('SEOCRAWLER_NODE');
 
 const interpreter = NODE ? { interpreter: NODE } : {};
 
