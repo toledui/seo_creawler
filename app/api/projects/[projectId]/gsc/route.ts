@@ -4,8 +4,10 @@ import { assertProjectOwner, assertProjectWrite, requireUser } from '@/lib/auth'
 import { handle, ok } from '@/lib/api';
 import {
   accountConnected,
+  buildAuthUrl,
   gscConfigured,
   listSites,
+  oauthRedirectUri,
 } from '@/src/keywords/gsc-client';
 
 type Params = { params: Promise<{ projectId: string }> };
@@ -50,6 +52,11 @@ export async function GET(_request: Request, { params }: Params) {
     return ok({
       configured,
       connected,
+      redirectUri: await oauthRedirectUri(),
+      // Tras autorizar, el callback devuelve al usuario a este proyecto.
+      authUrl: configured
+        ? await buildAuthUrl(`/projects/${projectId}/keywords`)
+        : null,
       siteUrl: project.gscSiteUrl,
       account: account
         ? {

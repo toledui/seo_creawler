@@ -7,7 +7,8 @@ type GscState = {
   configured: boolean;
   connected: boolean;
   redirectUri: string;
-  connection: { siteUrl: string; lastSyncAt: string | null; lastError: string | null } | null;
+  siteUrl: string | null;
+  account: { googleEmail: string | null; lastError: string | null; connectedAt: string } | null;
   sites: { siteUrl: string; permissionLevel: string }[];
   sitesError: string | null;
   authUrl: string | null;
@@ -71,7 +72,7 @@ export function TrackingPanel({
     }
   }, [load]);
 
-  async function selectSite(siteUrl: string) {
+  async function selectSite(siteUrl: string | null) {
     setBusy('site');
     await fetch(`/api/projects/${projectId}/gsc`, {
       method: 'PATCH',
@@ -82,11 +83,10 @@ export function TrackingPanel({
     load();
   }
 
-  async function disconnect() {
-    setBusy('disconnect');
-    await fetch(`/api/projects/${projectId}/gsc`, { method: 'DELETE' });
-    setBusy(null);
-    load();
+  // La autorización es de la cuenta: aquí sólo se desvincula la propiedad
+  // de este proyecto. Revocar Google se hace desde Ajustes.
+  async function unlinkSite() {
+    await selectSite(null);
   }
 
   async function post(action: 'run-now' | 'discover', extra: object = {}) {
@@ -122,7 +122,7 @@ export function TrackingPanel({
     load();
   }
 
-  const connected = gsc?.connected && Boolean(gsc.connection?.siteUrl);
+  const connected = gsc?.connected && Boolean(gsc.siteUrl);
 
   return (
     <div className="card space-y-3">
@@ -209,7 +209,7 @@ export function TrackingPanel({
         </div>
       )}
 
-      {gsc?.connected && !gsc.connection?.siteUrl && (
+      {gsc?.connected && !gsc.siteUrl && (
         <div className="space-y-2">
           <p className="text-sm">Elige la propiedad que quieres medir:</p>
           {gsc.sitesError && <p className="text-xs text-bad">{gsc.sitesError}</p>}
@@ -235,26 +235,26 @@ export function TrackingPanel({
 
       {open && (
         <div className="space-y-3 border-t border-line pt-3 text-xs">
-          {gsc?.connection?.siteUrl && (
+          {gsc?.siteUrl && (
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span>
-                Propiedad: <code className="text-fg">{gsc.connection.siteUrl}</code>
+                Propiedad: <code className="text-fg">{gsc.siteUrl}</code>
               </span>
-              <span className="text-muted">
-                Última sincronización: {formatDate(gsc.connection.lastSyncAt)}
-              </span>
+              {gsc.account?.googleEmail && (
+                <span className="text-muted">Cuenta: {gsc.account.googleEmail}</span>
+              )}
               <button
                 className="text-bad hover:underline"
-                onClick={disconnect}
+                onClick={unlinkSite}
                 disabled={busy !== null}
               >
-                Desconectar
+                Cambiar propiedad
               </button>
             </div>
           )}
 
-          {gsc?.connection?.lastError && (
-            <p className="text-bad">Último error: {gsc.connection.lastError}</p>
+          {gsc?.account?.lastError && (
+            <p className="text-bad">Último error: {gsc.account.lastError}</p>
           )}
 
           {tracking && (
