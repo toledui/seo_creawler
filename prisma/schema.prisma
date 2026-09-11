@@ -30,7 +30,7 @@ model User {
   projects    Project[]
   resetTokens PasswordResetToken[]
   settings    UserSettings?
-  gscAccount  GscAccount?
+  gscAccounts GscAccount[]
 
   /// Personas invitadas a MI espacio de trabajo
   teamMembers AccountMember[] @relation("AccountOwner")
@@ -106,12 +106,15 @@ model UserSettings {
 
 /// Conexion de Google a nivel de cuenta.
 ///
-/// El OAuth se autoriza una sola vez por cuenta; cada proyecto elige
-/// despues cual de sus propiedades de Search Console usa.
+/// Una cuenta de la app puede conectar varias cuentas de Google (p. ej.
+/// clientes directos y clientes de terceros); cada proyecto elige despues
+/// que cuenta y que propiedad de Search Console usa.
 model GscAccount {
   id     String @id @default(cuid())
-  userId String @unique
+  userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  projects Project[]
 
   /// Cifrados en reposo
   refreshToken String?   @db.Text
@@ -123,6 +126,9 @@ model GscAccount {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@unique([userId, googleEmail])
+  @@index([userId])
 }
 
 /// Configuracion global de la instancia, editable desde el panel de admin.
@@ -162,7 +168,11 @@ model Project {
 
   /// Propiedad de Search Console que mide este proyecto (la autorizacion
   /// vive en GscAccount, a nivel de cuenta).
-  gscSiteUrl String? @db.Text
+  gscSiteUrl   String?     @db.Text
+  /// Cuenta de Google con la que se lee esa propiedad. Null en proyectos
+  /// anteriores a las multi-cuenta: usan la primera cuenta conectada.
+  gscAccountId String?
+  gscAccount   GscAccount? @relation(fields: [gscAccountId], references: [id], onDelete: SetNull)
 
   // ---- Serplify (posicion real en el SERP)
   /// Medir posiciones con Serplify ademas de con Search Console

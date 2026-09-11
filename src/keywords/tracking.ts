@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { prisma } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
 import { env } from '../../lib/env';
-import { accountConnected, fetchSearchAnalytics, GscError } from './gsc-client';
+import { fetchSearchAnalytics, GscError, resolveProjectAccount } from './gsc-client';
 import { normalizeCountry, normalizeDevice, normalizeKeyword } from './normalize';
 import { serplifyConfig } from '../serp/serplify-client';
 import { checkKeywords, trackableKeywordIds } from '../serp/serp-tracking';
@@ -161,15 +161,18 @@ export async function runTrackingJob(
 ): Promise<TrackingRunResult> {
   const job = await prisma.trackingJob.findUnique({
     where: { id: jobId },
-    include: { project: { select: { userId: true, gscSiteUrl: true } } },
+    include: {
+      project: { select: { userId: true, gscSiteUrl: true, gscAccountId: true } },
+    },
   });
 
   if (!job) return { status: 'FAILED', matched: 0, processed: 0, message: 'Job no encontrado' };
 
-  const { userId, gscSiteUrl } = job.project;
-  const connected = await accountConnected(userId);
+  const { gscSiteUrl } = job.project;
+  const accountId = await resolveProjectAccount(job.project);
+  const connected = Boolean(accountId);
 
-  if (!gscSiteUrl || !connected) {
+  if (!gscSiteUrl || !accountId) {
     // Sin Search Console todavía puede haber medición de posiciones con
     // Serplify, que no depende de esa conexión.
     const serpOnly = await runSerpTracking(job.projectId, job.date);
@@ -184,7 +187,7 @@ export async function runTrackingJob(
           ? null
           : connected
             ? 'El proyecto no tiene propiedad de Search Console seleccionada'
-            : 'La cuenta no está conectada a Search Console',
+            : 'La cuenta de Google del proyecto no está conectada a Search Console',
       },
     });
 
@@ -204,7 +207,7 @@ export async function runTrackingJob(
   const isoDate = toIsoDate(target);
 
   try {
-    const rows = await fetchSearchAnalytics(userId, {
+    const rows = await fetchSearchAnalytics(accountId, {
       siteUrl: gscSiteUrl,
       startDate: isoDate,
       endDate: isoDate,
@@ -356,7 +359,7 @@ export async function runTrackingJob(
 
     if (err instanceof GscError) {
       await prisma.gscAccount.updateMany({
-        where: { userId },
+        where: { id: accountId },
         data: { lastError: message.slice(0, 2000) },
       });
     }
@@ -388,11 +391,18 @@ export async function discoverRankingKeywords(
 
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { userId: true, gscSiteUrl: true },
+    select: { userId: true, gscSiteUrl: true, gscAccountId: true },
   });
   if (!project?.gscSiteUrl) {
     throw new GscError(
       'El proyecto no tiene propiedad de Search Console seleccionada',
+    );
+  }
+
+  const accountId = await resolveProjectAccount(project);
+  if (!accountId) {
+    throw new GscError(
+      'La cuenta de Google de este proyecto no está conectada a Search Console',
     );
   }
 
@@ -401,7 +411,7 @@ export async function discoverRankingKeywords(
   const start = new Date(end);
   start.setUTCDate(start.getUTCDate() - days);
 
-  const rows = await fetchSearchAnalytics(project.userId, {
+  const rows = await fetchSearchAnalytics(accountId, {
     siteUrl: project.gscSiteUrl,
     startDate: toIsoDate(start),
     endDate: toIsoDate(end),

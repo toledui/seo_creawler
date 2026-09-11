@@ -8,9 +8,14 @@ type GscState = {
   connected: boolean;
   redirectUri: string;
   siteUrl: string | null;
-  account: { googleEmail: string | null; lastError: string | null; connectedAt: string } | null;
-  sites: { siteUrl: string; permissionLevel: string }[];
-  sitesError: string | null;
+  accountId: string | null;
+  accounts: {
+    id: string;
+    googleEmail: string | null;
+    lastError: string | null;
+    sites: { siteUrl: string; permissionLevel: string }[];
+    sitesError: string | null;
+  }[];
   authUrl: string | null;
 };
 
@@ -72,12 +77,12 @@ export function TrackingPanel({
     }
   }, [load]);
 
-  async function selectSite(siteUrl: string | null) {
+  async function selectSite(siteUrl: string | null, accountId: string | null) {
     setBusy('site');
     await fetch(`/api/projects/${projectId}/gsc`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ siteUrl }),
+      body: JSON.stringify({ siteUrl, accountId }),
     });
     setBusy(null);
     load();
@@ -86,7 +91,7 @@ export function TrackingPanel({
   // La autorización es de la cuenta: aquí sólo se desvincula la propiedad
   // de este proyecto. Revocar Google se hace desde Ajustes.
   async function unlinkSite() {
-    await selectSite(null);
+    await selectSite(null, null);
   }
 
   async function post(action: 'run-now' | 'discover', extra: object = {}) {
@@ -123,6 +128,9 @@ export function TrackingPanel({
   }
 
   const connected = gsc?.connected && Boolean(gsc.siteUrl);
+  // Sin cuenta asignada (proyecto antiguo) se mide con la primera.
+  const currentAccount =
+    gsc?.accounts.find((a) => a.id === gsc.accountId) ?? gsc?.accounts[0] ?? null;
 
   return (
     <div className="card space-y-3">
@@ -210,26 +218,42 @@ export function TrackingPanel({
       )}
 
       {gsc?.connected && !gsc.siteUrl && (
-        <div className="space-y-2">
-          <p className="text-sm">Elige la propiedad que quieres medir:</p>
-          {gsc.sitesError && <p className="text-xs text-bad">{gsc.sitesError}</p>}
-          <div className="flex flex-wrap gap-2">
-            {gsc.sites.map((site) => (
-              <button
-                key={site.siteUrl}
-                className="btn text-xs"
-                onClick={() => selectSite(site.siteUrl)}
-                disabled={busy !== null}
-              >
-                {site.siteUrl}
-              </button>
-            ))}
-            {gsc.sites.length === 0 && !gsc.sitesError && (
-              <p className="text-xs text-muted">
-                La cuenta no tiene propiedades verificadas.
-              </p>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm">Elige la propiedad que quieres medir:</p>
+            {gsc.authUrl && (
+              <a className="text-xs text-accent hover:underline" href={gsc.authUrl}>
+                + Conectar otra cuenta de Google
+              </a>
             )}
           </div>
+          {gsc.accounts.map((account) => (
+            <div key={account.id} className="space-y-1">
+              <p className="text-xs text-muted">
+                {account.googleEmail ?? 'Cuenta de Google'}
+              </p>
+              {account.sitesError && (
+                <p className="text-xs text-bad">{account.sitesError}</p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                {account.sites.map((site) => (
+                  <button
+                    key={site.siteUrl}
+                    className="btn text-xs"
+                    onClick={() => selectSite(site.siteUrl, account.id)}
+                    disabled={busy !== null}
+                  >
+                    {site.siteUrl}
+                  </button>
+                ))}
+                {account.sites.length === 0 && !account.sitesError && (
+                  <p className="text-xs text-muted">
+                    Esta cuenta no tiene propiedades verificadas.
+                  </p>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -240,8 +264,8 @@ export function TrackingPanel({
               <span>
                 Propiedad: <code className="text-fg">{gsc.siteUrl}</code>
               </span>
-              {gsc.account?.googleEmail && (
-                <span className="text-muted">Cuenta: {gsc.account.googleEmail}</span>
+              {currentAccount?.googleEmail && (
+                <span className="text-muted">Cuenta: {currentAccount.googleEmail}</span>
               )}
               <button
                 className="text-bad hover:underline"
@@ -253,8 +277,8 @@ export function TrackingPanel({
             </div>
           )}
 
-          {gsc?.account?.lastError && (
-            <p className="text-bad">Último error: {gsc.account.lastError}</p>
+          {gsc?.siteUrl && currentAccount?.lastError && (
+            <p className="text-bad">Último error: {currentAccount.lastError}</p>
           )}
 
           {tracking && (

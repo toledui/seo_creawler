@@ -40,8 +40,14 @@ export async function oauthRedirectUri(): Promise<string> {
   return `${settings.appUrl}/api/auth/google/callback`;
 }
 
-/** URL a la que enviamos al usuario para que autorice el acceso. */
-export async function buildAuthUrl(state: string): Promise<string> {
+/**
+ * URL a la que enviamos al usuario para que autorice el acceso.
+ *
+ * `select_account` obliga a Google a preguntar qué cuenta usar: sin él,
+ * "añadir otra cuenta" reutilizaría en silencio la sesión activa.
+ * `loginHint` preselecciona una cuenta concreta al reconectarla.
+ */
+export async function buildAuthUrl(state: string, loginHint?: string | null): Promise<string> {
   const settings = await getAppSettings();
   if (!settings.google.configured) throw new GscNotConfiguredError();
 
@@ -51,8 +57,9 @@ export async function buildAuthUrl(state: string): Promise<string> {
     response_type: 'code',
     scope: GSC_SCOPE,
     access_type: 'offline',
-    prompt: 'consent',
+    prompt: 'consent select_account',
     state,
+    ...(loginHint ? { login_hint: loginHint } : {}),
   });
 
   return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
@@ -114,32 +121,45 @@ export function emailFromIdToken(idToken: string | undefined): string | null {
   }
 }
 
-/** Guarda (cifrados) los tokens de una cuenta. */
+/**
+ * Guarda (cifrados) los tokens de una cuenta de Google y devuelve su id.
+ *
+ * Se identifica por el email: reconectar la misma cuenta actualiza la
+ * conexión existente y conectar otra distinta crea una nueva.
+ */
 export async function saveTokens(
   userId: string,
   tokens: TokenResponse,
-): Promise<void> {
+): Promise<string> {
+  const googleEmail = emailFromIdToken(tokens.id_token);
   const data = {
     accessToken: encrypt(tokens.access_token),
     expiresAt: new Date(Date.now() + tokens.expires_in * 1000),
-    googleEmail: emailFromIdToken(tokens.id_token),
+    googleEmail,
     lastError: null,
     ...(tokens.refresh_token
       ? { refreshToken: encrypt(tokens.refresh_token) }
       : {}),
   };
 
-  await prisma.gscAccount.upsert({
-    where: { userId },
-    create: { userId, ...data },
-    update: data,
+  const existing = await prisma.gscAccount.findFirst({
+    where: { userId, googleEmail },
+    select: { id: true },
   });
+
+  if (existing) {
+    await prisma.gscAccount.update({ where: { id: existing.id }, data });
+    return existing.id;
+  }
+
+  const created = await prisma.gscAccount.create({ data: { userId, ...data } });
+  return created.id;
 }
 
 /** Devuelve un access token válido para la cuenta, renovándolo si hace falta. */
-export async function accessTokenFor(userId: string): Promise<string> {
-  const account = await prisma.gscAccount.findUnique({ where: { userId } });
-  if (!account) throw new GscError('La cuenta no está conectada a Search Console');
+export async function accessTokenFor(accountId: string): Promise<string> {
+  const account = await prisma.gscAccount.findUnique({ where: { id: accountId } });
+  if (!account) throw new GscError('La cuenta de Google no está conectada a Search Console');
 
   const refreshToken = decrypt(account.refreshToken);
   if (!refreshToken) {
@@ -163,7 +183,7 @@ export async function accessTokenFor(userId: string): Promise<string> {
   });
 
   await prisma.gscAccount.update({
-    where: { userId },
+    where: { id: accountId },
     data: {
       accessToken: encrypt(refreshed.access_token),
       expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
@@ -176,9 +196,9 @@ export async function accessTokenFor(userId: string): Promise<string> {
 
 export type GscSite = { siteUrl: string; permissionLevel: string };
 
-/** Propiedades a las que tiene acceso la cuenta conectada. */
-export async function listSites(userId: string): Promise<GscSite[]> {
-  const token = await accessTokenFor(userId);
+/** Propiedades a las que tiene acceso una cuenta de Google conectada. */
+export async function listSites(accountId: string): Promise<GscSite[]> {
+  const token = await accessTokenFor(accountId);
   const res = await fetch(`${API_BASE}/sites`, {
     headers: { authorization: `Bearer ${token}` },
   });
@@ -218,7 +238,7 @@ export type GscQueryRow = {
  * diferencia entre saturar la cuota y no notarlo.
  */
 export async function fetchSearchAnalytics(
-  userId: string,
+  accountId: string,
   options: {
     siteUrl: string;
     startDate: string;
@@ -228,7 +248,7 @@ export async function fetchSearchAnalytics(
     dimensions?: ('query' | 'page' | 'country' | 'device' | 'date')[];
   },
 ): Promise<GscQueryRow[]> {
-  const token = await accessTokenFor(userId);
+  const token = await accessTokenFor(accountId);
   const dimensions = options.dimensions ?? ['query', 'page'];
 
   const res = await fetch(
@@ -286,11 +306,89 @@ export async function fetchSearchAnalytics(
   });
 }
 
-/** ¿Está esta cuenta conectada y con refresh token utilizable? */
-export async function accountConnected(userId: string): Promise<boolean> {
-  const account = await prisma.gscAccount.findUnique({
+export type GscAccountSummary = {
+  id: string;
+  googleEmail: string | null;
+  lastError: string | null;
+  connectedAt: Date;
+};
+
+/** Cuentas de Google conectadas (con refresh token utilizable), la más antigua primero. */
+export async function listAccounts(userId: string): Promise<GscAccountSummary[]> {
+  const rows = await prisma.gscAccount.findMany({
     where: { userId },
-    select: { refreshToken: true },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      id: true,
+      googleEmail: true,
+      lastError: true,
+      updatedAt: true,
+      refreshToken: true,
+    },
   });
-  return Boolean(decrypt(account?.refreshToken));
+
+  return rows
+    .filter((row) => Boolean(decrypt(row.refreshToken)))
+    .map((row) => ({
+      id: row.id,
+      googleEmail: row.googleEmail,
+      lastError: row.lastError,
+      connectedAt: row.updatedAt,
+    }));
+}
+
+/** Cada cuenta conectada con sus propiedades; el fallo de una no tumba las demás. */
+export async function listAccountsWithSites(userId: string) {
+  const accounts = await listAccounts(userId);
+
+  return Promise.all(
+    accounts.map(async (account) => {
+      try {
+        return { ...account, sites: await listSites(account.id), sitesError: null };
+      } catch (err) {
+        return {
+          ...account,
+          sites: [] as GscSite[],
+          sitesError: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }),
+  );
+}
+
+/** ¿Tiene esta cuenta de la app alguna cuenta de Google conectada? */
+export async function accountConnected(userId: string): Promise<boolean> {
+  return (await listAccounts(userId)).length > 0;
+}
+
+/**
+ * Cuenta de Google con la que se mide un proyecto, o null si no hay
+ * ninguna utilizable. Los proyectos sin cuenta asignada (anteriores a las
+ * multi-cuenta) usan la primera que se conectó.
+ */
+export async function resolveProjectAccount(project: {
+  userId: string;
+  gscAccountId: string | null;
+}): Promise<string | null> {
+  const accounts = await listAccounts(project.userId);
+
+  if (project.gscAccountId) {
+    return accounts.find((a) => a.id === project.gscAccountId)?.id ?? null;
+  }
+  return accounts[0]?.id ?? null;
+}
+
+/**
+ * Fija la cuenta de los proyectos que tienen propiedad pero no cuenta
+ * (venían de cuando sólo había una). Así, al conectar o quitar otras
+ * cuentas, esos proyectos no cambian de cuenta sin que nadie lo decida.
+ */
+export async function adoptLegacyProjects(userId: string): Promise<void> {
+  const [first] = await listAccounts(userId);
+  if (!first) return;
+
+  await prisma.project.updateMany({
+    where: { userId, gscAccountId: null, gscSiteUrl: { not: null } },
+    data: { gscAccountId: first.id },
+  });
 }

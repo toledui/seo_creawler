@@ -1,24 +1,28 @@
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { assertProjectOwner, assertProjectWrite, requireUser } from '@/lib/auth';
-import { handle, ok } from '@/lib/api';
+import { fail, handle, ok } from '@/lib/api';
 import {
-  accountConnected,
+  adoptLegacyProjects,
   buildAuthUrl,
   gscConfigured,
-  listSites,
+  listAccountsWithSites,
   oauthRedirectUri,
 } from '@/src/keywords/gsc-client';
 
 type Params = { params: Promise<{ projectId: string }> };
 
-const patchSchema = z.object({ siteUrl: z.string().max(500).nullable() });
+const patchSchema = z.object({
+  siteUrl: z.string().max(500).nullable(),
+  accountId: z.string().max(64).nullable().optional(),
+});
 
 /**
  * Estado de Search Console para un proyecto.
  *
- * La autorización es de la cuenta; aquí sólo se elige qué propiedad mide
- * este proyecto en concreto.
+ * La autorización es de la cuenta (que puede tener varias cuentas de
+ * Google); aquí sólo se elige con qué cuenta y qué propiedad se mide este
+ * proyecto en concreto.
  */
 export async function GET(_request: Request, { params }: Params) {
   return handle(async () => {
@@ -26,66 +30,69 @@ export async function GET(_request: Request, { params }: Params) {
     const { projectId } = await params;
     const project = await assertProjectOwner(projectId, user.id);
 
-    const [configured, connected] = await Promise.all([
+    // Las cuentas de Google son del dueño del proyecto: son las que usa
+    // el tracking diario.
+    await adoptLegacyProjects(project.userId);
+
+    const [configured, accounts, current] = await Promise.all([
       gscConfigured(),
-      accountConnected(user.id),
+      listAccountsWithSites(project.userId),
+      prisma.project.findUnique({
+        where: { id: projectId },
+        select: { gscSiteUrl: true, gscAccountId: true },
+      }),
     ]);
 
-    let sites: { siteUrl: string; permissionLevel: string }[] = [];
-    let sitesError: string | null = null;
-
-    if (connected) {
-      try {
-        sites = await listSites(user.id);
-      } catch (err) {
-        sitesError = err instanceof Error ? err.message : String(err);
-      }
-    }
-
-    const account = connected
-      ? await prisma.gscAccount.findUnique({
-          where: { userId: user.id },
-          select: { googleEmail: true, lastError: true, updatedAt: true },
-        })
-      : null;
+    // Sólo el dueño puede conectar sus cuentas de Google.
+    const isOwner = project.userId === user.id;
 
     return ok({
       configured,
-      connected,
+      connected: accounts.length > 0,
       redirectUri: await oauthRedirectUri(),
       // Tras autorizar, el callback devuelve al usuario a este proyecto.
-      authUrl: configured
-        ? await buildAuthUrl(`/projects/${projectId}/keywords`)
-        : null,
-      siteUrl: project.gscSiteUrl,
-      account: account
-        ? {
-            googleEmail: account.googleEmail,
-            lastError: account.lastError,
-            connectedAt: account.updatedAt,
-          }
-        : null,
-      sites,
-      sitesError,
+      authUrl:
+        configured && isOwner
+          ? await buildAuthUrl(`/projects/${projectId}/keywords`)
+          : null,
+      siteUrl: current?.gscSiteUrl ?? null,
+      accountId: current?.gscAccountId ?? null,
+      accounts: accounts.map((account) => ({
+        id: account.id,
+        googleEmail: account.googleEmail,
+        lastError: account.lastError,
+        sites: account.sites,
+        sitesError: account.sitesError,
+      })),
     });
   });
 }
 
-/** Selecciona qué propiedad de Search Console mide este proyecto. */
+/** Selecciona con qué cuenta de Google y qué propiedad se mide este proyecto. */
 export async function PATCH(request: Request, { params }: Params) {
   return handle(async () => {
     const user = await requireUser();
     const { projectId } = await params;
-    await assertProjectWrite(projectId, user.id);
+    const project = await assertProjectWrite(projectId, user.id);
 
     const body = patchSchema.parse(await request.json());
+    const siteUrl = body.siteUrl || null;
+    const accountId = siteUrl ? body.accountId || null : null;
 
-    const project = await prisma.project.update({
+    if (accountId) {
+      const account = await prisma.gscAccount.findFirst({
+        where: { id: accountId, userId: project.userId },
+        select: { id: true },
+      });
+      if (!account) return fail('Esa cuenta de Google no pertenece a este espacio', 400);
+    }
+
+    const updated = await prisma.project.update({
       where: { id: projectId },
-      data: { gscSiteUrl: body.siteUrl || null },
-      select: { gscSiteUrl: true },
+      data: { gscSiteUrl: siteUrl, gscAccountId: accountId },
+      select: { gscSiteUrl: true, gscAccountId: true },
     });
 
-    return ok({ siteUrl: project.gscSiteUrl });
+    return ok({ siteUrl: updated.gscSiteUrl, accountId: updated.gscAccountId });
   });
 }

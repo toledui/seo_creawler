@@ -12,10 +12,10 @@ import {
 import { maskSecret } from '@/lib/crypto';
 import { chat } from '@/src/ai/deepseek-client';
 import {
-  accountConnected,
+  adoptLegacyProjects,
   buildAuthUrl,
   gscConfigured,
-  listSites,
+  listAccountsWithSites,
 } from '@/src/keywords/gsc-client';
 
 const patchSchema = z.object({
@@ -33,6 +33,8 @@ const patchSchema = z.object({
 
 const actionSchema = z.object({
   action: z.enum(['test-ai', 'disconnect-gsc']),
+  /** Cuenta de Google a desconectar (sólo para disconnect-gsc). */
+  accountId: z.string().max(64).optional(),
 });
 
 /** Todo lo que la cuenta puede configurar por su cuenta. */
@@ -40,35 +42,26 @@ export async function GET() {
   return handle(async () => {
     const user = await requireUser();
 
-    const [settings, ai, app, connected] = await Promise.all([
+    await adoptLegacyProjects(user.id);
+
+    const [settings, ai, app, accounts, configured] = await Promise.all([
       getUserSettings(user.id),
       getUserAiConfig(user.id),
       getAppSettings(),
-      accountConnected(user.id),
+      listAccountsWithSites(user.id),
+      gscConfigured(),
     ]);
-
-    const account = connected
-      ? await prisma.gscAccount.findUnique({
-          where: { userId: user.id },
-          select: { googleEmail: true, lastError: true, updatedAt: true },
-        })
-      : null;
-
-    let sites: { siteUrl: string; permissionLevel: string }[] = [];
-    let sitesError: string | null = null;
-
-    if (connected) {
-      try {
-        sites = await listSites(user.id);
-      } catch (err) {
-        sitesError = err instanceof Error ? err.message : String(err);
-      }
-    }
 
     const projects = await prisma.project.findMany({
       where: { userId: user.id },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, name: true, domain: true, gscSiteUrl: true },
+      select: {
+        id: true,
+        name: true,
+        domain: true,
+        gscSiteUrl: true,
+        gscAccountId: true,
+      },
     });
 
     return ok({
@@ -93,14 +86,17 @@ export async function GET() {
       },
 
       gsc: {
-        configured: await gscConfigured(),
-        connected,
-        googleEmail: account?.googleEmail ?? null,
-        lastError: account?.lastError ?? null,
-        connectedAt: account?.updatedAt ?? null,
-        authUrl: (await gscConfigured()) ? await buildAuthUrl('/settings') : null,
-        sites,
-        sitesError,
+        configured,
+        connected: accounts.length > 0,
+        authUrl: configured ? await buildAuthUrl('/settings') : null,
+        accounts: await Promise.all(
+          accounts.map(async (account) => ({
+            ...account,
+            reconnectUrl: configured
+              ? await buildAuthUrl('/settings', account.googleEmail)
+              : null,
+          })),
+        ),
         projects,
       },
     });
@@ -153,12 +149,28 @@ export async function POST(request: Request) {
     const body = actionSchema.parse(await request.json());
 
     if (body.action === 'disconnect-gsc') {
-      await prisma.gscAccount.deleteMany({ where: { userId: user.id } });
-      await prisma.project.updateMany({
-        where: { userId: user.id },
-        data: { gscSiteUrl: null },
+      if (!body.accountId) return fail('Falta la cuenta de Google a desconectar', 400);
+
+      const account = await prisma.gscAccount.findFirst({
+        where: { id: body.accountId, userId: user.id },
+        select: { id: true, googleEmail: true },
       });
-      return ok({ success: true });
+      if (!account) return fail('Cuenta de Google no encontrada', 404);
+
+      // Primero se fijan los proyectos antiguos a su cuenta, para que al
+      // quitar ésta no pasen en silencio a medirse con otra.
+      await adoptLegacyProjects(user.id);
+
+      await prisma.project.updateMany({
+        where: { userId: user.id, gscAccountId: account.id },
+        data: { gscSiteUrl: null, gscAccountId: null },
+      });
+      await prisma.gscAccount.delete({ where: { id: account.id } });
+
+      return ok({
+        success: true,
+        message: `Desconectada ${account.googleEmail ?? 'la cuenta de Google'}`,
+      });
     }
 
     // Prueba de la clave de IA con la llamada más barata posible.

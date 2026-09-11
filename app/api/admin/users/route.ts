@@ -32,7 +32,7 @@ export async function GET() {
         createdAt: true,
         _count: { select: { projects: true } },
         settings: { select: { deepseekApiKey: true } },
-        gscAccount: { select: { googleEmail: true, refreshToken: true } },
+        gscAccounts: { select: { googleEmail: true, refreshToken: true } },
       },
     });
 
@@ -49,7 +49,11 @@ export async function GET() {
         createdAt: user.createdAt,
         projects: user._count.projects,
         hasAiKey: Boolean(user.settings?.deepseekApiKey),
-        gscEmail: user.gscAccount?.refreshToken ? user.gscAccount.googleEmail : null,
+        gscEmail:
+          user.gscAccounts
+            .filter((account) => account.refreshToken && account.googleEmail)
+            .map((account) => account.googleEmail)
+            .join(', ') || null,
       })),
     });
   });

@@ -8,7 +8,7 @@ import {
   startOfUtcDay,
   trackingConfig,
 } from '@/src/keywords/tracking';
-import { accountConnected } from '@/src/keywords/gsc-client';
+import { resolveProjectAccount } from '@/src/keywords/gsc-client';
 
 type Params = { params: Promise<{ projectId: string }> };
 
@@ -30,7 +30,7 @@ export async function GET(_request: Request, { params }: Params) {
 
     const today = startOfUtcDay(new Date());
 
-    const [jobs, project, trackedCount, connected] = await Promise.all([
+    const [jobs, project, trackedCount] = await Promise.all([
       prisma.trackingJob.findMany({
         where: { projectId },
         orderBy: { date: 'desc' },
@@ -38,11 +38,12 @@ export async function GET(_request: Request, { params }: Params) {
       }),
       prisma.project.findUnique({
         where: { id: projectId },
-        select: { gscSiteUrl: true },
+        select: { userId: true, gscSiteUrl: true, gscAccountId: true },
       }),
       prisma.keyword.count({ where: { projectId, tracked: true } }),
-      accountConnected(user.id),
     ]);
+
+    const connected = project ? Boolean(await resolveProjectAccount(project)) : false;
 
     const lastSync = await prisma.trackingJob.findFirst({
       where: { projectId, status: 'COMPLETED' },
@@ -81,17 +82,16 @@ export async function POST(request: Request, { params }: Params) {
 
     const body = schema.parse(await request.json());
 
-    const [connected, project] = await Promise.all([
-      accountConnected(user.id),
-      prisma.project.findUnique({
-        where: { id: projectId },
-        select: { gscSiteUrl: true },
-      }),
-    ]);
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { userId: true, gscSiteUrl: true, gscAccountId: true },
+    });
+
+    const connected = project ? Boolean(await resolveProjectAccount(project)) : false;
 
     if (!connected) {
       return fail(
-        'Tu cuenta no está conectada a Search Console. Conéctala desde Ajustes.',
+        'La cuenta de Google de este proyecto no está conectada a Search Console. Conéctala desde Ajustes.',
         409,
       );
     }

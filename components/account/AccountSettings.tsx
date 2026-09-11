@@ -23,15 +23,28 @@ type Data = {
   gsc: {
     configured: boolean;
     connected: boolean;
-    googleEmail: string | null;
-    lastError: string | null;
-    connectedAt: string | null;
     authUrl: string | null;
-    sites: { siteUrl: string; permissionLevel: string }[];
-    sitesError: string | null;
-    projects: { id: string; name: string; domain: string; gscSiteUrl: string | null }[];
+    accounts: {
+      id: string;
+      googleEmail: string | null;
+      lastError: string | null;
+      connectedAt: string;
+      reconnectUrl: string | null;
+      sites: { siteUrl: string; permissionLevel: string }[];
+      sitesError: string | null;
+    }[];
+    projects: {
+      id: string;
+      name: string;
+      domain: string;
+      gscSiteUrl: string | null;
+      gscAccountId: string | null;
+    }[];
   };
 };
+
+/** El select codifica cuenta y propiedad en un solo valor. */
+const SEP = '::';
 
 export function AccountSettings() {
   const [data, setData] = useState<Data | null>(null);
@@ -84,7 +97,7 @@ export function AccountSettings() {
     load();
   }
 
-  async function action(name: 'test-ai' | 'disconnect-gsc') {
+  async function action(name: 'test-ai' | 'disconnect-gsc', accountId?: string) {
     setBusy(name);
     setError(null);
     setNotice(null);
@@ -92,7 +105,7 @@ export function AccountSettings() {
     const res = await fetch('/api/account/settings', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ action: name }),
+      body: JSON.stringify({ action: name, accountId }),
     });
 
     const body = await res.json().catch(() => ({}));
@@ -107,12 +120,16 @@ export function AccountSettings() {
     load();
   }
 
-  async function setProjectSite(projectId: string, siteUrl: string) {
+  async function setProjectSite(projectId: string, value: string) {
+    const at = value.indexOf(SEP);
+    const accountId = at > 0 ? value.slice(0, at) : null;
+    const siteUrl = at > 0 ? value.slice(at + SEP.length) : null;
+
     setBusy(projectId);
     await fetch(`/api/projects/${projectId}/gsc`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ siteUrl: siteUrl || null }),
+      body: JSON.stringify({ siteUrl, accountId }),
     });
     setBusy(null);
     load();
@@ -238,53 +255,83 @@ export function AccountSettings() {
               <span
                 className={`badge ml-1 ${gsc.connected ? 'bg-ok/15 text-ok' : 'bg-panel2 text-muted'}`}
               >
-                {gsc.connected ? 'conectado' : 'sin conectar'}
+                {gsc.connected
+                  ? gsc.accounts.length === 1
+                    ? '1 cuenta conectada'
+                    : `${gsc.accounts.length} cuentas conectadas`
+                  : 'sin conectar'}
               </span>
             </p>
             <p className="text-sm text-muted">
-              Conecta tu Google una vez y elige después qué propiedad mide cada
-              proyecto.
-              {gsc.googleEmail && ` Conectado como ${gsc.googleEmail}.`}
+              Conecta una o varias cuentas de Google (por ejemplo, clientes
+              directos y clientes de terceros) y elige después con qué cuenta y
+              qué propiedad se mide cada proyecto.
             </p>
           </div>
 
-          <div className="flex gap-2">
-            {!gsc.connected && gsc.authUrl && (
-              <a className="btn btn-primary" href={gsc.authUrl}>
-                Conectar con Google
-              </a>
-            )}
-            {gsc.connected && (
-              <>
-                {gsc.authUrl && (
-                  <a className="btn" href={gsc.authUrl}>
-                    Reconectar
-                  </a>
-                )}
-                <button
-                  className="btn"
-                  disabled={busy !== null}
-                  onClick={() => action('disconnect-gsc')}
-                >
-                  Desconectar
-                </button>
-              </>
-            )}
-          </div>
+          {gsc.authUrl && (
+            <a
+              className={`btn ${gsc.connected ? '' : 'btn-primary'}`}
+              href={gsc.authUrl}
+            >
+              {gsc.connected ? 'Añadir otra cuenta de Google' : 'Conectar con Google'}
+            </a>
+          )}
         </div>
+
+        {gsc.accounts.length > 0 && (
+          <ul className="divide-y divide-line rounded border border-line">
+            {gsc.accounts.map((account) => (
+              <li key={account.id} className="space-y-1 px-3 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="text-sm font-medium">
+                      {account.googleEmail ?? 'Cuenta de Google'}
+                    </span>
+                    <span className="ml-2 text-[11px] text-muted">
+                      {account.sites.length} propiedades · conectada el{' '}
+                      {formatDate(account.connectedAt)}
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    {account.reconnectUrl && (
+                      <a className="btn text-xs" href={account.reconnectUrl}>
+                        Reconectar
+                      </a>
+                    )}
+                    <button
+                      className="btn text-xs"
+                      disabled={busy !== null}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `¿Desconectar ${account.googleEmail ?? 'esta cuenta'}? Los proyectos que la usan se quedarán sin propiedad asignada.`,
+                          )
+                        ) {
+                          action('disconnect-gsc', account.id);
+                        }
+                      }}
+                    >
+                      Desconectar
+                    </button>
+                  </div>
+                </div>
+                {account.lastError && (
+                  <p className="text-xs text-bad">Último error: {account.lastError}</p>
+                )}
+                {account.sitesError && (
+                  <p className="text-xs text-bad">{account.sitesError}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
 
         {!gsc.configured && (
           <p className="rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
             El administrador todavía no ha registrado las credenciales OAuth de
             Google, así que no se puede conectar.
           </p>
-        )}
-
-        {gsc.lastError && (
-          <p className="text-xs text-bad">Último error: {gsc.lastError}</p>
-        )}
-        {gsc.sitesError && (
-          <p className="text-xs text-bad">{gsc.sitesError}</p>
         )}
 
         {gsc.connected && gsc.projects.length > 0 && (
@@ -306,15 +353,29 @@ export function AccountSettings() {
                     <td>
                       <select
                         className="input w-auto py-1 text-xs"
-                        value={project.gscSiteUrl ?? ''}
+                        value={
+                          project.gscSiteUrl
+                            ? `${project.gscAccountId ?? gsc.accounts[0]?.id}${SEP}${project.gscSiteUrl}`
+                            : ''
+                        }
                         disabled={busy === project.id}
                         onChange={(e) => setProjectSite(project.id, e.target.value)}
                       >
                         <option value="">Sin asignar</option>
-                        {gsc.sites.map((site) => (
-                          <option key={site.siteUrl} value={site.siteUrl}>
-                            {site.siteUrl}
-                          </option>
+                        {gsc.accounts.map((account) => (
+                          <optgroup
+                            key={account.id}
+                            label={account.googleEmail ?? 'Cuenta de Google'}
+                          >
+                            {account.sites.map((site) => (
+                              <option
+                                key={site.siteUrl}
+                                value={`${account.id}${SEP}${site.siteUrl}`}
+                              >
+                                {site.siteUrl}
+                              </option>
+                            ))}
+                          </optgroup>
                         ))}
                       </select>
                     </td>
@@ -323,12 +384,6 @@ export function AccountSettings() {
               </tbody>
             </table>
           </div>
-        )}
-
-        {gsc.connectedAt && (
-          <p className="text-[11px] text-muted">
-            Conectado el {formatDate(gsc.connectedAt)}
-          </p>
         )}
       </div>
 
