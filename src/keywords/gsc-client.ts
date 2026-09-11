@@ -184,7 +184,15 @@ export async function listSites(userId: string): Promise<GscSite[]> {
   });
 
   if (!res.ok) {
-    throw new GscError(`No se pudieron listar las propiedades (${res.status})`);
+    // Google explica el motivo en el cuerpo (API deshabilitada, falta de
+    // permiso…); sin él un 403 es imposible de diagnosticar.
+    const body = (await res.json().catch(() => null)) as {
+      error?: { message?: string };
+    } | null;
+    const detail = body?.error?.message;
+    throw new GscError(
+      `No se pudieron listar las propiedades (${res.status})${detail ? `: ${detail}` : ''}`,
+    );
   }
 
   const json = (await res.json()) as { siteEntry?: GscSite[] };
