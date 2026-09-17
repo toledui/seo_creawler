@@ -34,11 +34,28 @@ export type ExtractedLink = {
 };
 
 export type ExtractedImage = {
+  /** URL absoluta del candidato principal (src, data-src o 1.º del srcset). */
   src: string;
+  /**
+   * Valor del atributo `alt`. `null` = el atributo NO existe (error de
+   * accesibilidad); `''` = `alt=""`, imagen decorativa declarada, que es
+   * válido y no debe reportarse como "sin alt".
+   */
   alt: string | null;
+  /** true si el elemento declara el atributo `alt`, aunque esté vacío. */
+  hasAlt: boolean;
   width: number | null;
   height: number | null;
   loading: string | null;
+  /** `srcset` (o `data-srcset`) sin procesar, tal y como venía en el HTML. */
+  srcset: string | null;
+  /**
+   * Todas las URLs absolutas que puede acabar pidiendo el navegador para
+   * esta misma imagen: src + srcset propio + `<source>` del `<picture>`.
+   * Son variantes del MISMO elemento, así que no generan incidencias
+   * duplicadas de alt.
+   */
+  candidates: string[];
 };
 
 export type ExtractedHeading = {

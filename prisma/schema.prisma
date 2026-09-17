@@ -305,11 +305,25 @@ model Page {
 
   finalUrl    String? @db.Text
   redirectUrl String? @db.Text
+  /// Saltos seguidos hasta `finalUrl`, en orden (array JSON de URLs).
+  redirectChain Json?
 
   statusCode    Int?
   contentType   String?
   responseTime  Int?
   contentLength Int?
+
+  /// Clasificacion de la URL segun su respuesta final:
+  /// HTML_PAGE | IMAGE | CSS | JAVASCRIPT | FONT | PDF | OTHER_ASSET |
+  /// REDIRECT | ERROR | UNKNOWN. Null en crawls anteriores a este campo.
+  resourceType String? @db.VarChar(24)
+  /// Que son los bytes, al margen del status (una imagen 404 sigue siendo
+  /// IMAGE). Mismo vocabulario sin REDIRECT ni ERROR.
+  mediaType    String? @db.VarChar(24)
+  /// Content-Type normalizado, en minusculas y sin parametros.
+  mimeType     String? @db.VarChar(127)
+  /// La extension de la URL promete un MIME y el servidor devuelve otro.
+  mimeMismatch Boolean @default(false)
 
   errorType String?
 
@@ -343,7 +357,11 @@ model Page {
   uniqueOutlinks   Int @default(0)
   externalOutlinks Int @default(0)
   imagesCount      Int @default(0)
+  /// Elementos <img> SIN atributo alt. `alt=""` no cuenta aqui.
   imagesMissingAlt Int @default(0)
+  /// Elementos <img> con alt="" (decorativas declaradas): observacion
+  /// informativa, nunca un error.
+  imagesDecorative Int @default(0)
 
   internalPageRank Float?
   betweenness      Float?
@@ -391,17 +409,32 @@ model Heading {
   @@index([pageId])
 }
 
+/// Un elemento <img> encontrado DENTRO de una pagina HTML.
+///
+/// Es la unica fuente de verdad para las incidencias de `alt`: nunca se
+/// deducen pidiendo la URL del archivo como si fuera una pagina.
 model ImageAsset {
   id      BigInt  @id @default(autoincrement())
   pageId  BigInt
   page    Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
   src     String  @db.Text
+  /// SHA-256 de `src` normalizada; permite cruzar la imagen con la fila de
+  /// Page correspondiente si tambien se rastreo como recurso.
+  urlHash String? @db.VarChar(64)
+  /// Contenido del atributo alt. Null = el atributo no existe (error);
+  /// '' = alt="" declarado (imagen decorativa, valido).
   alt     String? @db.Text
+  /// true si el elemento declara el atributo alt, aunque este vacio.
+  hasAlt  Boolean @default(true)
+  /// srcset (o data-srcset) sin procesar; sus URLs son variantes de esta
+  /// misma imagen y no cuentan como imagenes distintas.
+  srcset  String? @db.Text
   width   Int?
   height  Int?
   loading String?
 
   @@index([pageId])
+  @@index([urlHash])
 }
 
 model SchemaMarkup {

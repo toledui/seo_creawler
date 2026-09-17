@@ -20,6 +20,18 @@ export function pageFiltersFrom(searchParams: URLSearchParams, crawlId: string) 
     Object.assign(where, ranges[status] ?? {});
   }
 
+  // Separar páginas de recursos: `kind=pages` (por defecto en las vistas
+  // on-page) o `kind=assets`. `resourceType` filtra una categoría concreta.
+  // `resourceType IS NULL` son crawls anteriores a la clasificación.
+  // Va en AND para no pisar el OR que usa la búsqueda por texto.
+  const kind = searchParams.get('kind');
+  const htmlPage = { OR: [{ resourceType: 'HTML_PAGE' }, { resourceType: null }] };
+  if (kind === 'pages') where.AND = [htmlPage];
+  else if (kind === 'assets') where.AND = [{ NOT: htmlPage }];
+
+  const resourceType = searchParams.get('resourceType');
+  if (resourceType) where.resourceType = resourceType;
+
   const indexable = searchParams.get('indexable');
   if (indexable === 'true') where.indexable = true;
   if (indexable === 'false') where.indexable = false;

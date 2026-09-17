@@ -10,6 +10,8 @@ type PageRow = {
   id: string;
   normalizedUrl: string;
   statusCode: number | null;
+  resourceType: string | null;
+  mediaType: string | null;
   contentType: string | null;
   title: string | null;
   titleLength: number | null;
@@ -59,6 +61,16 @@ const COLUMNS: Column[] = [
     sortable: true,
     defaultVisible: true,
     render: (p) => <StatusBadge status={p.statusCode} />,
+  },
+  {
+    // Saber de un vistazo si la fila es una página o un recurso evita leer
+    // columnas on-page (title, H1…) que en un asset siempre están vacías.
+    key: 'resourceType',
+    label: 'Tipo',
+    defaultVisible: true,
+    render: (p) => (
+      <span className="text-xs text-muted">{p.resourceType ?? 'HTML_PAGE'}</span>
+    ),
   },
   {
     key: 'contentType',

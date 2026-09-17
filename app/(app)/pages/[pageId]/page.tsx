@@ -210,7 +210,8 @@ export default async function PageInspector({
 
         <div className="card">
           <h3 className="mb-3 text-sm font-semibold">
-            Imágenes ({page.imagesCount}, {page.imagesMissingAlt} sin alt)
+            Imágenes ({page.imagesCount}) · {page.imagesMissingAlt} sin atributo
+            alt · {page.imagesDecorative} decorativas
           </h3>
           {page.images.length === 0 ? (
             <p className="text-sm text-muted">Sin imágenes.</p>
@@ -229,8 +230,19 @@ export default async function PageInspector({
                       <td className="font-mono text-[11px]" title={image.src}>
                         {truncate(pathOf(image.src), 45)}
                       </td>
-                      <td className={image.alt ? 'text-xs' : 'text-xs text-bad'}>
-                        {image.alt ? truncate(image.alt, 40) : 'sin alt'}
+                      {/* Tres estados, nunca mezclados: alt="" es válido. */}
+                      <td
+                        className={
+                          !image.hasAlt ? 'text-xs text-bad' : 'text-xs'
+                        }
+                      >
+                        {!image.hasAlt ? (
+                          'sin atributo alt'
+                        ) : (image.alt ?? '').trim() === '' ? (
+                          <span className="text-muted">decorativa (alt=&quot;&quot;)</span>
+                        ) : (
+                          truncate(image.alt, 40)
+                        )}
                       </td>
                     </tr>
                   ))}

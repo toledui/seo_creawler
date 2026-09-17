@@ -1,7 +1,13 @@
 import { prisma } from '@/lib/prisma';
 import { assertCrawlOwner, requireUser } from '@/lib/auth';
 import { fail, handle } from '@/lib/api';
-import { csvResponse, issuesCsv, linksCsv, pagesCsv } from '@/src/exports/csv';
+import {
+  csvResponse,
+  imagesCsv,
+  issuesCsv,
+  linksCsv,
+  pagesCsv,
+} from '@/src/exports/csv';
 import { renderCrawlReport } from '@/src/exports/build';
 import { isReportFormat } from '@/src/exports/report-renderers';
 
@@ -12,6 +18,7 @@ type Params = { params: Promise<{ crawlId: string; file: string }> };
  *   /api/crawls/:id/export/pages.csv
  *   /api/crawls/:id/export/internal-links.csv
  *   /api/crawls/:id/export/external-links.csv
+ *   /api/crawls/:id/export/images.csv
  *   /api/crawls/:id/export/issues.csv
  *
  * Y el informe del rastreo maquetado, en los mismos formatos que los
@@ -95,6 +102,16 @@ export async function GET(_request: Request, { params }: Params) {
             'cache-control': 'no-store',
           },
         });
+      }
+
+      case 'images.csv': {
+        const filename = `images-${short}.csv`;
+        await track(
+          'images',
+          filename,
+          await prisma.imageAsset.count({ where: { page: { crawlId } } }),
+        );
+        return csvResponse(imagesCsv(crawlId), filename);
       }
 
       case 'issues.csv': {

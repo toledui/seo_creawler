@@ -24,11 +24,12 @@ export default async function ExportsPage({
   });
   if (!crawl) notFound();
 
-  const [pages, internal, external, issues] = await Promise.all([
+  const [pages, internal, external, issues, images] = await Promise.all([
     prisma.page.count({ where: { crawlId } }),
     prisma.link.count({ where: { crawlId, linkType: 'INTERNAL' } }),
     prisma.link.count({ where: { crawlId, linkType: 'EXTERNAL' } }),
     prisma.issue.count({ where: { crawlId } }),
+    prisma.imageAsset.count({ where: { page: { crawlId } } }),
   ]);
 
   const exports = [
@@ -49,6 +50,13 @@ export default async function ExportsPage({
       title: 'external-links.csv',
       description: 'Enlaces salientes hacia otros dominios.',
       count: external,
+    },
+    {
+      file: 'images.csv',
+      title: 'images.csv',
+      description:
+        'Un <img> por fila con su página de origen y el estado del atributo alt (ausente, decorativo o descriptivo).',
+      count: images,
     },
     {
       file: 'issues.csv',

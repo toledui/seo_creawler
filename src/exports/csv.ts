@@ -1,12 +1,16 @@
-import type { Issue, Link, Page } from '@prisma/client';
+import type { ImageAsset, Issue, Link, Page } from '@prisma/client';
 import { stringify } from 'csv-stringify';
 import { Readable } from 'node:stream';
 import { prisma } from '../../lib/prisma';
+import { altState } from '../seo/image-audit';
 
 type Row = Record<string, unknown>;
 
 type PageRecord = Page;
 type IssueRecord = Issue;
+type ImageRecord = ImageAsset & {
+  page: { normalizedUrl: string; crawlId: string };
+};
 type LinkRecord = Link & {
   sourcePage: { normalizedUrl: string };
   targetPage: { statusCode: number | null } | null;
@@ -43,6 +47,8 @@ export function pagesCsv(crawlId: string) {
   const columns = [
     'url',
     'status',
+    'resourceType',
+    'mediaType',
     'contentType',
     'title',
     'titleLength',
@@ -80,6 +86,8 @@ export function pagesCsv(crawlId: string) {
       yield rows.map((p) => ({
         url: p.normalizedUrl,
         status: p.statusCode ?? '',
+        resourceType: p.resourceType ?? '',
+        mediaType: p.mediaType ?? '',
         contentType: p.contentType ?? '',
         title: p.title ?? '',
         titleLength: p.titleLength ?? '',
@@ -102,6 +110,66 @@ export function pagesCsv(crawlId: string) {
         inSitemap: p.inSitemap ? 'true' : 'false',
         potentialOrphan: p.potentialOrphan ? 'true' : 'false',
         errorType: p.errorType ?? '',
+      }));
+    }
+  });
+}
+
+/**
+ * Inventario de elementos <img> hallados dentro de páginas HTML.
+ *
+ * Una fila por aparición, con la página de origen: permite agrupar por
+ * imagen y saber en cuántas páginas distintas aparece el problema.
+ */
+export function imagesCsv(crawlId: string) {
+  const columns = [
+    'page',
+    'imageUrl',
+    'altState',
+    'alt',
+    'srcset',
+    'width',
+    'height',
+    'loading',
+    'imageStatus',
+  ];
+
+  return csvStream(columns, async function* () {
+    let cursor: bigint | null = null;
+    for (;;) {
+      const rows: ImageRecord[] = await prisma.imageAsset.findMany({
+        where: {
+          page: { crawlId },
+          ...(cursor ? { id: { gt: cursor } } : {}),
+        },
+        orderBy: { id: 'asc' },
+        take: BATCH,
+        include: { page: { select: { normalizedUrl: true, crawlId: true } } },
+      });
+      if (rows.length === 0) return;
+      cursor = rows[rows.length - 1].id;
+
+      // Status real del archivo, si esa URL también se rastreó.
+      const hashes = [...new Set(rows.map((r) => r.urlHash).filter(Boolean))] as string[];
+      const assets = hashes.length
+        ? await prisma.page.findMany({
+            where: { crawlId, urlHash: { in: hashes } },
+            select: { urlHash: true, statusCode: true },
+          })
+        : [];
+      const statusByHash = new Map(assets.map((a) => [a.urlHash, a.statusCode]));
+
+      yield rows.map((i) => ({
+        page: i.page.normalizedUrl,
+        imageUrl: i.src,
+        // Tres estados distintos, nunca mezclados:
+        altState: altState(i),
+        alt: i.alt ?? '',
+        srcset: i.srcset ?? '',
+        width: i.width ?? '',
+        height: i.height ?? '',
+        loading: i.loading ?? '',
+        imageStatus: i.urlHash ? (statusByHash.get(i.urlHash) ?? '') : '',
       }));
     }
   });

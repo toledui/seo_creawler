@@ -58,7 +58,10 @@ export default async function ProjectPage({
 
       {lastCompleted && stats?.totals && (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatCard label="URLs último crawl" value={formatNumber(stats.totals.pages)} />
+          <StatCard
+            label="Páginas HTML (último crawl)"
+            value={formatNumber(stats.totals.pages)}
+          />
           <StatCard
             label="Indexables"
             value={formatNumber(stats.totals.indexable)}

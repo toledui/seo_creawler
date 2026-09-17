@@ -1,4 +1,4 @@
-import { issue, type SeoRule } from './types';
+import { isAuditableHtmlPage, issue, type SeoRule } from './types';
 
 export const MAX_RECOMMENDED_DEPTH = 4;
 const THIN_CONTENT_WORDS = 200;
@@ -34,6 +34,7 @@ export const canonicalizedRule: SeoRule = {
   title: 'URL canonicalizada a otra',
   description: 'El canonical apunta a una URL distinta, la página no se indexará.',
   run(page) {
+    if (!isAuditableHtmlPage(page)) return [];
     if (page.indexabilityReason !== 'CANONICALIZED') return [];
     return [issue(page, canonicalizedRule, `canonical → ${page.canonical}`)];
   },
@@ -45,8 +46,7 @@ export const missingCanonicalRule: SeoRule = {
   title: 'Canonical ausente',
   description: 'La página indexable no declara link rel=canonical.',
   run(page) {
-    const status = page.statusCode ?? 0;
-    if (status < 200 || status >= 300) return [];
+    if (!isAuditableHtmlPage(page)) return [];
     if (page.canonical) return [];
     return [issue(page, missingCanonicalRule)];
   },
@@ -58,6 +58,7 @@ export const noindexRule: SeoRule = {
   title: 'Página con noindex',
   description: 'meta robots o X-Robots-Tag marcan la página como noindex.',
   run(page) {
+    if (!isAuditableHtmlPage(page)) return [];
     if (page.indexabilityReason !== 'NOINDEX') return [];
     return [issue(page, noindexRule, page.metaRobots ?? 'X-Robots-Tag')];
   },
@@ -80,6 +81,7 @@ export const deepPageRule: SeoRule = {
   title: `Profundidad mayor a ${MAX_RECOMMENDED_DEPTH}`,
   description: 'La página está demasiado lejos de la home en clics.',
   run(page) {
+    if (!isAuditableHtmlPage(page)) return [];
     if (page.depth <= MAX_RECOMMENDED_DEPTH) return [];
     if (!page.indexable) return [];
     return [issue(page, deepPageRule, `Profundidad ${page.depth}`)];
@@ -92,6 +94,7 @@ export const thinContentRule: SeoRule = {
   title: 'Contenido escaso',
   description: `Menos de ${THIN_CONTENT_WORDS} palabras de texto visible.`,
   run(page) {
+    if (!isAuditableHtmlPage(page)) return [];
     if (!page.indexable) return [];
     if (page.wordCount >= THIN_CONTENT_WORDS) return [];
     return [issue(page, thinContentRule, `${page.wordCount} palabras`)];
@@ -104,12 +107,38 @@ export const imagesMissingAltRule: SeoRule = {
   title: 'Imágenes sin atributo alt',
   description: 'La página contiene imágenes sin texto alternativo.',
   run(page) {
+    // Las incidencias de alt nacen SIEMPRE de los <img> del DOM de una
+    // página HTML, nunca de pedir la URL del archivo de imagen.
+    if (!isAuditableHtmlPage(page)) return [];
     if (page.imagesMissingAlt <= 0) return [];
     return [
       issue(
         page,
         imagesMissingAltRule,
-        `${page.imagesMissingAlt} de ${page.imagesCount} imágenes`,
+        `${page.imagesMissingAlt} de ${page.imagesCount} imágenes sin atributo alt`,
+      ),
+    ];
+  },
+};
+
+/**
+ * `alt=""` es la forma correcta de declarar una imagen decorativa, así que
+ * se informa sin penalizar. Nunca se mezcla con IMAGES_MISSING_ALT.
+ */
+export const imagesDecorativeAltRule: SeoRule = {
+  code: 'IMAGES_DECORATIVE_ALT',
+  severity: 'INFO',
+  title: 'Imágenes decorativas (alt vacío)',
+  description:
+    'La página declara imágenes con alt="". Es válido para decoración; revisa que ninguna aporte contenido.',
+  run(page) {
+    if (!isAuditableHtmlPage(page)) return [];
+    if (page.imagesDecorative <= 0) return [];
+    return [
+      issue(
+        page,
+        imagesDecorativeAltRule,
+        `${page.imagesDecorative} de ${page.imagesCount} imágenes con alt=""`,
       ),
     ];
   },
@@ -121,6 +150,7 @@ export const lowInlinksRule: SeoRule = {
   title: 'Pocos enlaces internos entrantes',
   description: 'La página indexable recibe menos de 2 enlaces internos.',
   run(page) {
+    if (!isAuditableHtmlPage(page)) return [];
     if (!page.indexable) return [];
     if (page.depth === 0) return [];
     if (page.internalInlinks >= 2) return [];
@@ -134,6 +164,7 @@ export const orphanRule: SeoRule = {
   title: 'Página huérfana potencial',
   description: 'Aparece en el sitemap pero no recibe ningún enlace interno.',
   run(page) {
+    if (!isAuditableHtmlPage(page)) return [];
     if (!page.potentialOrphan) return [];
     return [issue(page, orphanRule, 'En sitemap, sin inlinks internos')];
   },

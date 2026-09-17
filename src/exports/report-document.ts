@@ -73,7 +73,7 @@ export function auditDocument(
       items: [
         { label: 'Proyecto', value: meta.projectName },
         { label: 'Dominio', value: meta.domain },
-        { label: 'URLs rastreadas', value: meta.crawledUrls.toLocaleString('es-ES') },
+        { label: 'URLs solicitadas', value: meta.crawledUrls.toLocaleString('es-ES') },
         { label: 'Score IA', value: `${report.score}/100` },
         { label: 'Generado', value: formatDate(meta.createdAt) },
         { label: 'Modelo', value: meta.model },
@@ -342,6 +342,11 @@ export type CrawlMeta = {
  * Informe del rastreo en sí (sin IA): las métricas que ya calcula
  * `analyzeCrawl`, maquetadas para poder enviarlas o archivarlas.
  */
+/** Un ratio 0–1 como porcentaje legible. */
+function percent(ratio: number): string {
+  return `${(ratio * 100).toFixed(1)}%`;
+}
+
 export function crawlDocument(
   stats: CrawlStats,
   meta: CrawlMeta,
@@ -364,7 +369,8 @@ export function crawlDocument(
         { label: 'Proyecto', value: meta.projectName },
         { label: 'Dominio', value: meta.domain },
         { label: 'Estado', value: meta.status },
-        { label: 'URLs rastreadas', value: meta.crawledUrls.toLocaleString('es-ES') },
+        { label: 'URLs solicitadas', value: meta.crawledUrls.toLocaleString('es-ES') },
+        { label: 'Páginas HTML', value: totals.pages.toLocaleString('es-ES') },
         { label: 'URLs descubiertas', value: meta.discoveredUrls.toLocaleString('es-ES') },
         { label: 'Fallidas', value: meta.failedUrls.toLocaleString('es-ES') },
         { label: 'SEO Health', value: `${stats.seoHealth}/100` },
@@ -383,7 +389,8 @@ export function crawlDocument(
       headers: ['Métrica', 'Valor'],
       rows: [
         ['URL de inicio', meta.startUrl],
-        ['Páginas', totals.pages.toLocaleString('es-ES')],
+        ['Páginas HTML analizadas', totals.pages.toLocaleString('es-ES')],
+        ['URLs solicitadas (con recursos)', totals.requestedUrls.toLocaleString('es-ES')],
         ['Indexables', totals.indexable.toLocaleString('es-ES')],
         ['No indexables', totals.nonIndexable.toLocaleString('es-ES')],
         ['Errores', totals.errors.toLocaleString('es-ES')],
@@ -394,6 +401,56 @@ export function crawlDocument(
         ['Tiempo de respuesta medio', `${Math.round(totals.averageResponseTime)} ms`],
         ['Palabras por página (media)', Math.round(totals.averageWordCount).toLocaleString('es-ES')],
         ['Análisis calculado', formatDate(new Date(stats.computedAt))],
+      ],
+    },
+
+    // Los recursos van en su propia sección: no son páginas y no se
+    // auditan con reglas de metadatos HTML.
+    { type: 'heading', level: 2, text: 'Recursos descubiertos' },
+    {
+      type: 'table',
+      headers: ['Métrica', 'Valor'],
+      rows: [
+        ['Recursos (no HTML)', stats.resources.discovered.toLocaleString('es-ES')],
+        ...Object.entries(stats.resources.byType)
+          .filter(([type]) => type !== 'HTML_PAGE')
+          .sort((a, b) => b[1] - a[1])
+          .map(([type, count]): [string, string] => [
+            `· ${type}`,
+            count.toLocaleString('es-ES'),
+          ]),
+        ['Imágenes solicitadas', stats.resources.images.toLocaleString('es-ES')],
+        [
+          'Imágenes rotas',
+          `${stats.resources.brokenImages.toLocaleString('es-ES')} (${percent(stats.resources.brokenImagesRatio)} de las imágenes solicitadas)`,
+        ],
+        ['Recursos rotos', stats.resources.broken.toLocaleString('es-ES')],
+        [
+          'Extensión ≠ Content-Type',
+          stats.resources.mimeMismatches.toLocaleString('es-ES'),
+        ],
+      ],
+    },
+
+    { type: 'heading', level: 2, text: 'Imágenes dentro de páginas HTML' },
+    {
+      type: 'table',
+      headers: ['Métrica', 'Valor'],
+      rows: [
+        ['Elementos <img> auditados', stats.images.elements.toLocaleString('es-ES')],
+        [
+          'Sin atributo alt',
+          `${stats.images.missingAlt.toLocaleString('es-ES')} (${percent(stats.images.missingAltRatio)} de los <img> auditados)`,
+        ],
+        [
+          'Decorativas (alt="")',
+          `${stats.images.decorativeAlt.toLocaleString('es-ES')} · válido, sólo informativo`,
+        ],
+        ['Con alt descriptivo', stats.images.describedAlt.toLocaleString('es-ES')],
+        [
+          'Páginas afectadas por imágenes sin alt',
+          stats.images.pagesWithMissingAlt.toLocaleString('es-ES'),
+        ],
       ],
     },
   );

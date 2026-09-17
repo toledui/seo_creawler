@@ -387,6 +387,26 @@ cifrados de la base no se pueden recuperar.
 
 ---
 
+## Pruebas
+
+Las pruebas usan el runner nativo de Node (`node:test`) ejecutado con `tsx`: no
+tocan base de datos ni red, sólo código puro (clasificación de recursos, parseo
+de HTML y motor de reglas).
+
+```bash
+npm test          # tsx --test tests/*.test.ts
+npm run typecheck # tsc --noEmit
+```
+
+| Archivo | Cubre |
+| --- | --- |
+| `tests/resource-type.test.ts` | HTML, HTML con charset, XHTML, WebP, JPG/PNG, SVG, CSS, JS, fuentes, PDF, Content-Type ausente, `application/octet-stream`, URL sin extensión, query string, redirección a HTML, redirección a imagen, imagen 404, `.jpg` servido como `image/webp`, 404 HTML personalizada |
+| `tests/parse-html-images.test.ts` | `alt` ausente, `alt=""`, `alt` descriptivo, `srcset`, `<picture>`/`<source>`, lazy loading, URLs relativas, CDN externo, parámetros de transformación, `background-image` |
+| `tests/seo-rules-resource-gating.test.ts` | Ningún asset dispara reglas de HTML; los errores HTTP de assets sí se detectan; las páginas HTML reales se siguen auditando |
+| `tests/novemp-regression.test.ts` | Regresión completa sobre un fixture local de 158 URLs con 54 archivos en `/wp-content/uploads/` |
+
+---
+
 ## Variables de entorno
 
 Todas viven en `.env` (hay una plantilla en `.env.example`).
@@ -619,6 +639,81 @@ prisma/schema.prisma      modelo de datos
    hub/authority (HITS), comunidades (Louvain), huérfanas potenciales,
    duplicados exactos y casi duplicados, issues y el score SEO/GEO.
 
+### Clasificación de recursos: páginas vs. assets
+
+No todo lo que se rastrea es una página. Antes de aplicar ninguna regla SEO,
+cada URL se clasifica en `src/crawler/resource-type.ts` a partir de **su
+respuesta HTTP final**:
+
+| `resourceType` | Cuándo |
+| --- | --- |
+| `HTML_PAGE` | `text/html`, `application/xhtml+xml` con 2xx |
+| `IMAGE` | cualquier `image/*`, incluido `image/svg+xml` |
+| `CSS` | `text/css` |
+| `JAVASCRIPT` | `application/javascript`, `text/javascript`… |
+| `FONT` | `font/*`, `application/vnd.ms-fontobject`… |
+| `PDF` | `application/pdf` |
+| `OTHER_ASSET` | cualquier otro MIME reconocible |
+| `REDIRECT` | la respuesta fue 3xx |
+| `ERROR` | 4xx, 5xx, o fallo de red/DNS/TLS/timeout |
+| `UNKNOWN` | ni la cabecera ni la extensión permiten decidir |
+
+La **señal principal es la cabecera `Content-Type`**, normalizada a minúsculas y
+sin parámetros (`text/html; charset=UTF-8` → `text/html`). La extensión de la
+URL es **sólo señal secundaria**: se usa cuando la cabecera falta, es genérica
+(`application/octet-stream`) o no es un MIME válido. Si ambas se conocen y no
+coinciden (`.jpg` servido como `image/webp`) gana la cabecera y se marca
+`mimeMismatch`, que genera la incidencia `MIME_MISMATCH`.
+
+En una respuesta de error manda la extensión, porque el `text/html` de un 404 de
+WordPress describe la plantilla de error, no el archivo pedido: así una imagen
+borrada se reporta como **imagen rota** y no como "página sin title".
+
+Consecuencias:
+
+- Las reglas que miran el DOM (title, description, H1, canonical, robots,
+  schema, idioma, contenido escaso, enlaces de la página, alt de imágenes) sólo
+  se ejecutan si `resourceType === 'HTML_PAGE'` **y** la respuesta es 2xx. Lo
+  garantiza `isAuditableHtmlPage()` en `src/seo/rules/types.ts`.
+- Un binario nunca se parsea como HTML.
+- Una 404 con plantilla HTML personalizada no aporta métricas on-page.
+- Los assets sí se siguen auditando **como recursos**: código HTTP, URL final,
+  MIME, redirecciones, tamaño y `BROKEN_ASSET` si no se entregan.
+- **No se bloquea nada en `robots.txt`.** Google necesita acceso a imágenes, CSS
+  y JS para renderizar y para posicionar imágenes; el problema se resuelve
+  clasificando, no ocultando.
+
+### Imágenes: el `alt` sale del DOM, no de la URL
+
+Las incidencias de `alt` nacen de los elementos `<img>` encontrados **dentro de
+una página HTML**, nunca de pedir la URL del archivo como si fuera una página.
+Hay tres estados y no se mezclan (`src/seo/image-audit.ts`):
+
+| Estado | HTML | Cómo se reporta |
+| --- | --- | --- |
+| `MISSING` | `<img src="x.webp">` | `IMAGES_MISSING_ALT` (error) |
+| `DECORATIVE` | `<img src="x.webp" alt="">` | `IMAGES_DECORATIVE_ALT` (INFO) |
+| `DESCRIPTIVE` | `<img src="x.webp" alt="Panel LMS">` | correcto |
+
+Un `<img>` con `srcset` y un `<picture>` con varios `<source>` son **una sola
+imagen** con varias variantes, no seis imágenes sin alt. Las imágenes servidas
+sólo por `background-image` en CSS no tienen elemento `<img>` y por tanto no se
+reportan como "sin alt".
+
+### Métricas: cada porcentaje con su denominador
+
+| Métrica | Denominador |
+| --- | --- |
+| Páginas sin meta description, sin H1, sin canonical… | `totals.pages` (páginas HTML) |
+| Imágenes sin atributo alt | `images.elements` (elementos `<img>` auditados) |
+| Imágenes rotas | `resources.images` (recursos de imagen solicitados) |
+| Distribución de códigos de estado | `totals.requestedUrls` (todas las URLs) |
+
+`totals.pages` cuenta **sólo documentos HTML**. La cifra global de URLs pedidas
+vive en `totals.requestedUrls` y se etiqueta "URLs solicitadas" en la interfaz.
+`stats.resources` y `stats.images` son bloques nuevos del JSON de `Crawl.stats`;
+los campos anteriores se conservan para no romper consumidores.
+
 ### Pausar, reanudar y re-rastrear
 
 La frontera BFS se persiste en la tabla `FrontierUrl`, así que **pausar y
@@ -649,7 +744,12 @@ Para rastrear un sitio local en pruebas, arranca el worker con
 | CRITICAL | `HTTP_5XX`, `REDIRECT_LOOP` |
 | HIGH | `HTTP_4XX`, `FETCH_ERROR`, `NOINDEX`, `BLOCKED_ROBOTS`, `POTENTIAL_ORPHAN`, `BROKEN_INTERNAL_LINK` |
 | MEDIUM | `MISSING_TITLE`, `DUPLICATE_TITLE`, `MISSING_DESCRIPTION`, `DUPLICATE_DESCRIPTION`, `DUPLICATE_CONTENT`, `MISSING_H1`, `MULTIPLE_H1`, `DEEP_PAGE`, `REDIRECT`, `CANONICALIZED`, `LOW_INLINKS` |
-| LOW | `TITLE_TOO_LONG`, `TITLE_TOO_SHORT`, `DESCRIPTION_TOO_LONG`, `DESCRIPTION_TOO_SHORT`, `THIN_CONTENT`, `IMAGES_MISSING_ALT`, `MISSING_CANONICAL`, `SCHEMA_MISSING_RECOMMENDED` |
+| LOW | `TITLE_TOO_LONG`, `TITLE_TOO_SHORT`, `DESCRIPTION_TOO_LONG`, `DESCRIPTION_TOO_SHORT`, `THIN_CONTENT`, `IMAGES_MISSING_ALT`, `MISSING_CANONICAL`, `SCHEMA_MISSING_RECOMMENDED`, `MIME_MISMATCH` |
+| INFO | `IMAGES_DECORATIVE_ALT` |
+
+Reglas de recurso (se aplican a cualquier `resourceType`, no sólo a páginas):
+`HTTP_4XX`, `HTTP_5XX`, `FETCH_ERROR`, `REDIRECT`, `REDIRECT_LOOP`,
+`BLOCKED_ROBOTS`, `BROKEN_ASSET`, `MIME_MISMATCH`.
 
 Además de las reglas por página:
 
@@ -662,6 +762,7 @@ Además de las reglas por página:
 | `HREFLANG_MISSING_SELF` | Conjunto hreflang sin auto-referencia |
 | `HREFLANG_BROKEN_TARGET` | Alternativa que no responde 200 |
 | `HREFLANG_NOT_RECIPROCAL` | La URL destino no devuelve la referencia |
+| `BROKEN_IMAGE` | Una página HTML usa un `<img>` cuyo archivo responde 4xx/5xx |
 
 Cada regla vive en `src/seo/rules/` y se registra en `src/seo/rules/index.ts`;
 añadir una nueva es crear el objeto `SeoRule` y meterlo en el array.

@@ -65,6 +65,8 @@ export async function GET(request: Request, { params }: Params) {
           id: true,
           normalizedUrl: true,
           statusCode: true,
+          resourceType: true,
+          mediaType: true,
           contentType: true,
           title: true,
           titleLength: true,

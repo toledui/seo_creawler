@@ -1,5 +1,6 @@
 import * as cheerio from 'cheerio';
 import { createHash } from 'node:crypto';
+import { srcsetUrls } from './srcset';
 import type {
   ExtractedHeading,
   ExtractedHreflang,
@@ -137,23 +138,66 @@ export function parseHtml(html: string, pageUrl: string): ParsedPage {
   });
 
   // ---------------------------------------------------------- Imágenes
+  //
+  // Una entrada por elemento `<img>`, nunca por URL: el srcset y los
+  // `<source>` de un `<picture>` son variantes de la MISMA imagen, así que
+  // se guardan como candidatos del elemento. De lo contrario una foto
+  // responsive con seis tamaños contaría como seis imágenes sin alt.
+  const absolutize = (value: string): string => {
+    try {
+      return new URL(value, pageUrl).toString();
+    } catch {
+      return value;
+    }
+  };
+
   const images: ExtractedImage[] = [];
   $('img').each((_, el) => {
     const $el = $(el);
-    const src = ($el.attr('src') ?? $el.attr('data-src') ?? '').trim();
-    if (!src) return;
-    let absolute = src;
-    try {
-      absolute = new URL(src, pageUrl).toString();
-    } catch {
-      /* dejamos el valor original */
+
+    const srcset = clean($el.attr('srcset') ?? $el.attr('data-srcset'));
+
+    const candidates: string[] = [];
+    const push = (value: string | undefined | null) => {
+      const raw = (value ?? '').trim();
+      if (!raw) return;
+      const absolute = absolutize(raw);
+      if (!candidates.includes(absolute)) candidates.push(absolute);
+    };
+
+    push($el.attr('src'));
+    push($el.attr('data-src'));
+    for (const url of srcsetUrls(srcset)) push(url);
+
+    // `<picture><source srcset=…><img …></picture>`: los hermanos describen
+    // la misma imagen (WebP/AVIF alternativos, art direction…).
+    const $parent = $el.parent();
+    if ($parent.length && ($parent.get(0) as { tagName?: string })?.tagName === 'picture') {
+      $parent.find('source').each((__, source) => {
+        const $source = $(source);
+        for (const url of srcsetUrls($source.attr('srcset') ?? $source.attr('data-srcset'))) {
+          push(url);
+        }
+        push($source.attr('src'));
+      });
     }
+
+    if (candidates.length === 0) return;
+
+    // `attr()` devuelve undefined si el atributo no existe y '' si existe
+    // vacío: esa diferencia es justo la que separa un error de una imagen
+    // decorativa correctamente declarada.
+    const altAttr = $el.attr('alt');
+
     images.push({
-      src: absolute,
-      alt: $el.attr('alt') ?? null,
+      src: candidates[0],
+      alt: altAttr ?? null,
+      hasAlt: altAttr !== undefined,
       width: intAttr($el.attr('width')),
       height: intAttr($el.attr('height')),
       loading: clean($el.attr('loading')),
+      srcset,
+      candidates: candidates.slice(0, 12),
     });
   });
 

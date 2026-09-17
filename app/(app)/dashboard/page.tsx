@@ -47,7 +47,7 @@ export default async function DashboardPage() {
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="Proyectos" value={formatNumber(projects)} href="/projects" />
-        <StatCard label="URLs rastreadas" value={formatNumber(pageCount)} />
+        <StatCard label="URLs solicitadas" value={formatNumber(pageCount)} />
         <StatCard label="Issues detectados" value={formatNumber(issueCount)} tone="warn" />
         <StatCard
           label="Crawls activos"

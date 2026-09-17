@@ -57,9 +57,10 @@ export default async function CrawlOverviewPage({
         <>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <StatCard
-              label="URLs rastreadas"
+              label="Páginas HTML"
               value={formatNumber(stats.totals.pages)}
-              href={`${base}/pages`}
+              hint={`${formatNumber(stats.totals.requestedUrls)} URLs solicitadas`}
+              href={`${base}/pages?kind=pages`}
             />
             <StatCard
               label="Indexables"
@@ -72,7 +73,14 @@ export default async function CrawlOverviewPage({
               label="Errores 4xx/5xx"
               value={formatNumber(stats.totals.errors)}
               tone="bad"
-              href={`${base}/pages?status=4xx`}
+              hint="sólo páginas HTML"
+              href={`${base}/pages?kind=pages&status=4xx`}
+            />
+            <StatCard
+              label="Recursos descubiertos"
+              value={formatNumber(stats.resources.discovered)}
+              hint={`${formatNumber(stats.resources.images)} imágenes · ${formatNumber(stats.resources.broken)} rotos`}
+              href={`${base}/pages?kind=assets`}
             />
             <StatCard
               label="Redirecciones"
@@ -105,13 +113,18 @@ export default async function CrawlOverviewPage({
 
           <div className="grid gap-4 lg:grid-cols-2">
             <div className="card">
-              <h3 className="mb-2 text-sm font-semibold">Códigos de estado</h3>
+              <h3 className="mb-2 text-sm font-semibold">
+                Códigos de estado
+                <span className="ml-1 font-normal text-muted">
+                  · sobre {formatNumber(stats.totals.requestedUrls)} URLs solicitadas
+                </span>
+              </h3>
               {Object.entries(stats.statusDistribution).map(([bucket, count]) => (
                 <BarRow
                   key={bucket}
                   label={bucket}
                   value={count}
-                  total={stats.totals.pages}
+                  total={stats.totals.requestedUrls}
                   color={
                     bucket === '2xx'
                       ? 'bg-ok'
@@ -145,7 +158,12 @@ export default async function CrawlOverviewPage({
             </div>
 
             <div className="card">
-              <h3 className="mb-2 text-sm font-semibold">Indexabilidad</h3>
+              <h3 className="mb-2 text-sm font-semibold">
+                Indexabilidad
+                <span className="ml-1 font-normal text-muted">
+                  · sobre {formatNumber(stats.totals.pages)} páginas HTML
+                </span>
+              </h3>
               {Object.entries(stats.indexabilityDistribution).map(([reason, count]) => (
                 <BarRow
                   key={reason}
@@ -156,6 +174,70 @@ export default async function CrawlOverviewPage({
                   href={`${base}/pages?reason=${reason}`}
                 />
               ))}
+            </div>
+
+            <div className="card">
+              <h3 className="mb-2 text-sm font-semibold">
+                Recursos descubiertos
+                <span className="ml-1 font-normal text-muted">
+                  · no se auditan con reglas de páginas
+                </span>
+              </h3>
+              {Object.entries(stats.resources.byType)
+                .filter(([type]) => type !== 'HTML_PAGE')
+                .sort((a, b) => b[1] - a[1])
+                .map(([type, count]) => (
+                  <BarRow
+                    key={type}
+                    label={type}
+                    value={count}
+                    total={stats.totals.requestedUrls}
+                    color="bg-panel2 border border-line"
+                    href={`${base}/pages?resourceType=${type}`}
+                  />
+                ))}
+              {stats.resources.discovered === 0 ? (
+                <p className="text-sm text-muted">Sin recursos no-HTML.</p>
+              ) : null}
+            </div>
+
+            <div className="card">
+              <h3 className="mb-2 text-sm font-semibold">
+                Imágenes en páginas HTML
+                <span className="ml-1 font-normal text-muted">
+                  · sobre {formatNumber(stats.images.elements)} elementos &lt;img&gt;
+                </span>
+              </h3>
+              {stats.images.elements === 0 ? (
+                <p className="text-sm text-muted">Sin imágenes auditadas.</p>
+              ) : (
+                <>
+                  <BarRow
+                    label="Sin atributo alt"
+                    value={stats.images.missingAlt}
+                    total={stats.images.elements}
+                    color="bg-bad"
+                  />
+                  <BarRow
+                    label='Decorativas (alt="")'
+                    value={stats.images.decorativeAlt}
+                    total={stats.images.elements}
+                    color="bg-panel2 border border-line"
+                  />
+                  <BarRow
+                    label="Con alt descriptivo"
+                    value={stats.images.describedAlt}
+                    total={stats.images.elements}
+                    color="bg-ok"
+                  />
+                  <p className="mt-2 text-xs text-muted">
+                    {formatNumber(stats.images.pagesWithMissingAlt)} páginas
+                    afectadas · {formatNumber(stats.resources.brokenImages)} de{' '}
+                    {formatNumber(stats.resources.images)} imágenes solicitadas
+                    están rotas.
+                  </p>
+                </>
+              )}
             </div>
 
             <div className="card">

@@ -2,8 +2,10 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { logCrawl } from '../../lib/logger';
 import { env } from '../../lib/env';
-import { fetchPage, isHtml } from './fetch-page';
+import { fetchPage } from './fetch-page';
 import { parseHtml } from './parse-html';
+import { classifyResource } from './resource-type';
+import { altState } from '../seo/image-audit';
 import {
   directoryOf,
   isSameSite,
@@ -222,16 +224,33 @@ export async function runCrawl(
 
     if (!blockedByRobots) {
       result = await fetchPage(item.normalizedUrl, { userAgent });
-      if (result.body && isHtml(result.contentType)) {
-        try {
-          parsed = parseHtml(result.body, result.finalUrl || item.normalizedUrl);
-        } catch (err) {
-          await hooks.onEvent(
-            'parse_error',
-            `${item.normalizedUrl}: ${(err as Error).message}`,
-            'warn',
-          );
-        }
+    }
+
+    // Antes de tocar el cuerpo decidimos QUÉ es esta URL. Sin este paso un
+    // WebP de /wp-content/uploads/ acaba en las reglas de metadatos y
+    // genera falsos "title ausente", "H1 ausente" o "canonical ausente".
+    const classification = classifyResource({
+      url: item.normalizedUrl,
+      finalUrl: result?.finalUrl ?? null,
+      statusCode: result?.statusCode ?? null,
+      contentType: result?.contentType ?? null,
+      errorType: blockedByRobots ? 'BLOCKED_ROBOTS' : result?.errorType ?? null,
+      redirectChain: result?.redirectChain ?? null,
+    });
+
+    // Sólo se parsea DOM si los bytes son realmente un documento HTML:
+    // nunca interpretamos binarios como texto. Una 404 con plantilla HTML
+    // sí se parsea (es útil para diagnosticar), pero su `resourceType` es
+    // ERROR, así que las reglas on-page no llegan a evaluarla.
+    if (result?.body && classification.mediaType === 'HTML_PAGE') {
+      try {
+        parsed = parseHtml(result.body, result.finalUrl || item.normalizedUrl);
+      } catch (err) {
+        await hooks.onEvent(
+          'parse_error',
+          `${item.normalizedUrl}: ${(err as Error).message}`,
+          'warn',
+        );
       }
     }
 
@@ -248,7 +267,7 @@ export async function runCrawl(
       normalizedUrl: item.normalizedUrl,
       canonicalNormalized,
       blockedByRobots,
-      isHtml: isHtml(result?.contentType ?? null),
+      isHtml: classification.isHtmlDocument,
       hasError: Boolean(
         result?.errorType && result.errorType !== 'UNSUPPORTED_CONTENT',
       ),
@@ -259,8 +278,12 @@ export async function runCrawl(
       Boolean(result?.errorType && result.errorType !== 'UNSUPPORTED_CONTENT') ||
       (result?.statusCode ?? 0) >= 400;
 
+    // "Sin alt" = el atributo no existe. `alt=""` es una imagen decorativa
+    // declarada: se cuenta aparte como observación, no como error.
     const imagesMissingAlt =
-      parsed?.images.filter((i) => !i.alt || !i.alt.trim()).length ?? 0;
+      parsed?.images.filter((i) => altState(i) === 'MISSING').length ?? 0;
+    const imagesDecorative =
+      parsed?.images.filter((i) => altState(i) === 'DECORATIVE').length ?? 0;
 
     // Normalizamos los enlaces una sola vez y reutilizamos el resultado.
     const normalizedLinks = parsed
@@ -282,8 +305,15 @@ export async function runCrawl(
       urlHash: item.hash,
       finalUrl: result?.finalUrl?.slice(0, 2000) ?? null,
       redirectUrl: result?.redirectUrl?.slice(0, 2000) ?? null,
+      redirectChain: (result?.redirectChain?.length
+        ? result.redirectChain.slice(0, 20)
+        : Prisma.DbNull) as Prisma.InputJsonValue,
       statusCode: result?.statusCode ?? null,
       contentType: result?.contentType?.slice(0, 190) ?? null,
+      resourceType: classification.resourceType,
+      mediaType: classification.mediaType,
+      mimeType: classification.mimeType?.slice(0, 127) ?? null,
+      mimeMismatch: classification.extensionMismatch,
       responseTime: result?.responseTime ?? null,
       contentLength: result?.contentLength ?? null,
       errorType: blockedByRobots ? 'BLOCKED_ROBOTS' : result?.errorType ?? null,
@@ -308,6 +338,7 @@ export async function runCrawl(
       externalOutlinks: normalizedLinks.length - internalCount,
       imagesCount: parsed?.images.length ?? 0,
       imagesMissingAlt,
+      imagesDecorative,
       inSitemap: sitemapHashes.has(item.hash),
       directory: directoryOf(item.normalizedUrl).slice(0, 250),
       contentHash: parsed?.contentHash ?? null,
@@ -350,7 +381,11 @@ export async function runCrawl(
           data: parsed.images.slice(0, 200).map((i) => ({
             pageId: page.id,
             src: i.src.slice(0, 2000),
+            urlHash:
+              normalizeWithHash(i.src, item.normalizedUrl)?.hash ?? null,
             alt: i.alt?.slice(0, 1000) ?? null,
+            hasAlt: i.hasAlt,
+            srcset: i.srcset?.slice(0, 2000) ?? null,
             width: i.width,
             height: i.height,
             loading: i.loading?.slice(0, 50) ?? null,

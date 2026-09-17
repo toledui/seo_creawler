@@ -13,16 +13,58 @@ import {
 
 export type CrawlStats = {
   totals: {
+    /**
+     * Documentos HTML analizados. NO incluye imágenes, CSS, JS, fuentes ni
+     * PDFs: ése es el denominador correcto de todo lo on-page.
+     */
     pages: number;
+    /** Todas las URLs que se pidieron, assets incluidos. */
+    requestedUrls: number;
+    /** Indexables sobre el total de páginas HTML. */
     indexable: number;
     nonIndexable: number;
+    /** Páginas HTML con 4xx/5xx. */
     errors: number;
+    /** Redirecciones sobre el total de URLs solicitadas. */
     redirects: number;
     internalLinks: number;
     externalLinks: number;
+    /** Medias calculadas sólo sobre páginas HTML. */
     averageDepth: number;
     averageResponseTime: number;
     averageWordCount: number;
+  };
+  /** Todo lo que no es un documento HTML. */
+  resources: {
+    /** URLs solicitadas que no son páginas HTML. */
+    discovered: number;
+    /** Recuento por `resourceType`. */
+    byType: Record<string, number>;
+    /** Recursos de imagen solicitados. */
+    images: number;
+    /** Recursos (de cualquier tipo) que responden 4xx/5xx o fallan. */
+    broken: number;
+    /** Imágenes solicitadas que están rotas. */
+    brokenImages: number;
+    /** Porcentaje de imágenes rotas sobre imágenes solicitadas. */
+    brokenImagesRatio: number;
+    /** Discrepancias entre extensión y Content-Type. */
+    mimeMismatches: number;
+  };
+  /** Auditoría de los elementos <img> hallados dentro de páginas HTML. */
+  images: {
+    /** Total de elementos <img> auditados. */
+    elements: number;
+    /** Sin atributo alt (error). */
+    missingAlt: number;
+    /** Con alt="" (decorativas declaradas: observación, no error). */
+    decorativeAlt: number;
+    /** Con alt descriptivo. */
+    describedAlt: number;
+    /** Páginas HTML distintas afectadas por imágenes sin alt. */
+    pagesWithMissingAlt: number;
+    /** missingAlt / elements. */
+    missingAltRatio: number;
   };
   statusDistribution: Record<string, number>;
   depthDistribution: Record<string, number>;
@@ -298,6 +340,10 @@ async function runSeoRules(crawlId: string) {
         statusCode: true,
         errorType: true,
         contentType: true,
+        resourceType: true,
+        mediaType: true,
+        mimeType: true,
+        mimeMismatch: true,
         title: true,
         titleLength: true,
         metaDescription: true,
@@ -313,6 +359,7 @@ async function runSeoRules(crawlId: string) {
         internalInlinks: true,
         imagesCount: true,
         imagesMissingAlt: true,
+        imagesDecorative: true,
         inSitemap: true,
         potentialOrphan: true,
         redirectUrl: true,
@@ -346,6 +393,7 @@ async function runSeoRules(crawlId: string) {
     'Contenido duplicado',
   );
   await detectBrokenInternalLinks(crawlId);
+  await detectBrokenImages(crawlId);
   await detectNearDuplicates(crawlId);
   await validateStructuredData(crawlId);
   await validateHreflangSets(crawlId);
@@ -366,11 +414,12 @@ async function detectDuplicates(
        JOIN (
          SELECT LEFT(${column}, 190) AS v, COUNT(*) AS cnt
            FROM Page
-          WHERE crawlId = ? AND indexable = 1 AND ${column} IS NOT NULL AND ${column} <> ''
+          WHERE crawlId = ? AND indexable = 1 AND resourceType = 'HTML_PAGE'
+            AND ${column} IS NOT NULL AND ${column} <> ''
           GROUP BY v
          HAVING COUNT(*) > 1
        ) d ON d.v = LEFT(p.${column}, 190)
-      WHERE p.crawlId = ? AND p.indexable = 1
+      WHERE p.crawlId = ? AND p.indexable = 1 AND p.resourceType = 'HTML_PAGE'
       LIMIT 20000`,
     crawlId,
     crawlId,
@@ -429,13 +478,75 @@ async function detectBrokenInternalLinks(crawlId: string) {
   }
 }
 
+/**
+ * Imágenes usadas en una página HTML cuyo archivo responde 4xx/5xx.
+ *
+ * La incidencia se ancla a la PÁGINA que la usa, no a la URL del archivo:
+ * así queda claro dónde hay que arreglarla. Sólo se detecta cuando la URL
+ * de la imagen también llegó a rastrearse como recurso (normalmente porque
+ * algo enlaza directamente al archivo); las imágenes que sólo aparecen en
+ * `<img>` no se solicitan durante el crawl.
+ */
+async function detectBrokenImages(crawlId: string) {
+  const rows = await prisma.$queryRaw<
+    {
+      sourceId: bigint;
+      sourceUrl: string;
+      imageUrl: string;
+      status: number | null;
+      appearances: bigint;
+    }[]
+  >`
+    SELECT sp.id            AS sourceId,
+           sp.normalizedUrl AS sourceUrl,
+           tp.normalizedUrl AS imageUrl,
+           tp.statusCode    AS status,
+           COUNT(*)         AS appearances
+      FROM ImageAsset ia
+      JOIN Page sp ON sp.id = ia.pageId
+      JOIN Page tp ON tp.crawlId = sp.crawlId AND tp.urlHash = ia.urlHash
+     WHERE sp.crawlId = ${crawlId}
+       AND sp.resourceType = 'HTML_PAGE'
+       AND ia.urlHash IS NOT NULL
+       AND (tp.statusCode >= 400 OR tp.statusCode IS NULL)
+     GROUP BY sp.id, sp.normalizedUrl, tp.normalizedUrl, tp.statusCode
+     LIMIT 20000
+  `;
+
+  if (rows.length === 0) return;
+
+  for (let i = 0; i < rows.length; i += 1000) {
+    await prisma.issue.createMany({
+      data: rows.slice(i, i + 1000).map((r) => ({
+        crawlId,
+        pageId: r.sourceId,
+        url: r.sourceUrl.slice(0, 2000),
+        code: 'BROKEN_IMAGE',
+        severity: 'HIGH' as const,
+        title: 'Imagen rota en la página',
+        details: `→ ${r.imageUrl} (${r.status ?? 'sin respuesta'}) · ${Number(r.appearances)} apariciones`,
+      })),
+    });
+  }
+}
+
 // -------------------------------------------------------------- Métricas
 
 async function computeStats(
   crawlId: string,
   modularity: number | null,
 ): Promise<CrawlStats> {
+  // Páginas HTML frente a URLs solicitadas. `resourceType IS NULL` son
+  // crawls anteriores a la clasificación: se siguen contando como páginas
+  // para no alterar sus métricas históricas.
+  const htmlPage: Prisma.PageWhereInput = {
+    crawlId,
+    OR: [{ resourceType: 'HTML_PAGE' }, { resourceType: null }],
+  };
+  const HTML_SQL = Prisma.sql`(resourceType = 'HTML_PAGE' OR resourceType IS NULL)`;
+
   const [
+    requestedUrls,
     total,
     indexable,
     errors,
@@ -450,13 +561,14 @@ async function computeStats(
     linkTotals,
   ] = await Promise.all([
     prisma.page.count({ where: { crawlId } }),
-    prisma.page.count({ where: { crawlId, indexable: true } }),
-    prisma.page.count({ where: { crawlId, statusCode: { gte: 400 } } }),
+    prisma.page.count({ where: htmlPage }),
+    prisma.page.count({ where: { ...htmlPage, indexable: true } }),
+    prisma.page.count({ where: { ...htmlPage, statusCode: { gte: 400 } } }),
     prisma.page.count({
       where: { crawlId, statusCode: { gte: 300, lt: 400 } },
     }),
     prisma.page.aggregate({
-      where: { crawlId },
+      where: htmlPage,
       _avg: { depth: true, responseTime: true, wordCount: true },
     }),
     prisma.$queryRaw<{ bucket: string; count: bigint }[]>`
@@ -471,10 +583,12 @@ async function computeStats(
         FROM Page WHERE crawlId = ${crawlId} GROUP BY bucket`,
     prisma.$queryRaw<{ depth: number; count: bigint }[]>`
       SELECT depth, COUNT(*) AS count FROM Page
-       WHERE crawlId = ${crawlId} GROUP BY depth ORDER BY depth`,
+       WHERE crawlId = ${crawlId} AND ${HTML_SQL}
+       GROUP BY depth ORDER BY depth`,
     prisma.$queryRaw<{ indexabilityReason: string; count: bigint }[]>`
       SELECT indexabilityReason, COUNT(*) AS count FROM Page
-       WHERE crawlId = ${crawlId} GROUP BY indexabilityReason`,
+       WHERE crawlId = ${crawlId} AND ${HTML_SQL}
+       GROUP BY indexabilityReason`,
     prisma.$queryRaw<{ severity: string; count: bigint }[]>`
       SELECT severity, COUNT(*) AS count FROM Issue
        WHERE crawlId = ${crawlId} GROUP BY severity`,
@@ -486,7 +600,7 @@ async function computeStats(
       SELECT COALESCE(directory, '/') AS directory,
              COUNT(*) AS pages,
              SUM(indexable = 1) AS indexable
-        FROM Page WHERE crawlId = ${crawlId}
+        FROM Page WHERE crawlId = ${crawlId} AND ${HTML_SQL}
        GROUP BY directory ORDER BY pages DESC LIMIT 30`,
     prisma.$queryRaw<{ internal: bigint; external: bigint }[]>`
       SELECT SUM(linkType = 'INTERNAL') AS internal,
@@ -500,6 +614,8 @@ async function computeStats(
   ): Record<string, number> =>
     Object.fromEntries(rows.map((r) => [String(r[key]), Number(r.count)]));
 
+  const resources = await computeResourceStats(crawlId, requestedUrls, total);
+  const images = await computeImageStats(crawlId);
   const geo = await computeGeoStats(crawlId, indexable);
   const architecture = await computeArchitectureStats(crawlId, modularity);
 
@@ -517,6 +633,7 @@ async function computeStats(
   return {
     totals: {
       pages: total,
+      requestedUrls,
       indexable,
       nonIndexable: total - indexable,
       errors,
@@ -527,6 +644,8 @@ async function computeStats(
       averageResponseTime: Math.round(aggregates._avg.responseTime ?? 0),
       averageWordCount: Math.round(aggregates._avg.wordCount ?? 0),
     },
+    resources,
+    images,
     statusDistribution: toRecord(statusRows, 'bucket'),
     depthDistribution: toRecord(depthRows, 'depth'),
     indexabilityDistribution: toRecord(reasonRows, 'indexabilityReason'),
@@ -546,6 +665,96 @@ async function computeStats(
     seoHealth,
     architecture,
     computedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Inventario de recursos: todo lo que se solicitó y NO es un documento
+ * HTML. Se cuenta aparte para que nunca contamine las métricas on-page.
+ */
+async function computeResourceStats(
+  crawlId: string,
+  requestedUrls: number,
+  htmlPages: number,
+): Promise<CrawlStats['resources']> {
+  const [typeRows, imageRows, mismatches] = await Promise.all([
+    prisma.$queryRaw<{ resourceType: string | null; count: bigint }[]>`
+      SELECT resourceType, COUNT(*) AS count FROM Page
+       WHERE crawlId = ${crawlId} GROUP BY resourceType`,
+    prisma.$queryRaw<{ total: bigint; broken: bigint }[]>`
+      SELECT COUNT(*) AS total,
+             SUM(statusCode IS NULL OR statusCode >= 400) AS broken
+        FROM Page
+       WHERE crawlId = ${crawlId} AND mediaType = 'IMAGE'`,
+    prisma.page.count({ where: { crawlId, mimeMismatch: true } }),
+  ]);
+
+  const byType: Record<string, number> = {};
+  for (const row of typeRows) {
+    byType[row.resourceType ?? 'UNKNOWN'] =
+      (byType[row.resourceType ?? 'UNKNOWN'] ?? 0) + Number(row.count);
+  }
+
+  const broken = await prisma.page.count({
+    where: {
+      crawlId,
+      NOT: { OR: [{ resourceType: 'HTML_PAGE' }, { resourceType: null }] },
+      OR: [{ statusCode: { gte: 400 } }, { statusCode: null }],
+    },
+  });
+
+  const images = Number(imageRows[0]?.total ?? 0);
+  const brokenImages = Number(imageRows[0]?.broken ?? 0);
+
+  return {
+    discovered: Math.max(0, requestedUrls - htmlPages),
+    byType,
+    images,
+    broken,
+    brokenImages,
+    // Denominador correcto: recursos de imagen SOLICITADOS, no páginas.
+    brokenImagesRatio: images > 0 ? Number((brokenImages / images).toFixed(4)) : 0,
+    mimeMismatches: mismatches,
+  };
+}
+
+/**
+ * Auditoría de los elementos <img> del DOM de las páginas HTML.
+ *
+ * El denominador es el número de elementos `<img>`, nunca el de páginas ni
+ * el de archivos de imagen. `alt=""` se cuenta como decorativa declarada,
+ * no como "sin alt".
+ */
+async function computeImageStats(crawlId: string): Promise<CrawlStats['images']> {
+  const rows = await prisma.$queryRaw<
+    {
+      elements: bigint;
+      missingAlt: bigint;
+      decorativeAlt: bigint;
+      pagesWithMissingAlt: bigint;
+    }[]
+  >`
+    SELECT COUNT(*) AS elements,
+           SUM(ia.hasAlt = 0) AS missingAlt,
+           SUM(ia.hasAlt = 1 AND TRIM(COALESCE(ia.alt, '')) = '') AS decorativeAlt,
+           COUNT(DISTINCT CASE WHEN ia.hasAlt = 0 THEN p.id END) AS pagesWithMissingAlt
+      FROM ImageAsset ia
+      JOIN Page p ON p.id = ia.pageId
+     WHERE p.crawlId = ${crawlId}
+       AND (p.resourceType = 'HTML_PAGE' OR p.resourceType IS NULL)
+  `;
+
+  const elements = Number(rows[0]?.elements ?? 0);
+  const missingAlt = Number(rows[0]?.missingAlt ?? 0);
+  const decorativeAlt = Number(rows[0]?.decorativeAlt ?? 0);
+
+  return {
+    elements,
+    missingAlt,
+    decorativeAlt,
+    describedAlt: Math.max(0, elements - missingAlt - decorativeAlt),
+    pagesWithMissingAlt: Number(rows[0]?.pagesWithMissingAlt ?? 0),
+    missingAltRatio: elements > 0 ? Number((missingAlt / elements).toFixed(4)) : 0,
   };
 }
 

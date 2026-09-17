@@ -13,10 +13,12 @@ import {
   titleTooLongRule,
   titleTooShortRule,
 } from './metadata';
+import { assetRules } from './assets';
 import {
   blockedByRobotsRule,
   canonicalizedRule,
   deepPageRule,
+  imagesDecorativeAltRule,
   imagesMissingAltRule,
   lowInlinksRule,
   missingCanonicalRule,
@@ -53,6 +55,8 @@ export const pageRules: SeoRule[] = [
   lowInlinksRule,
   thinContentRule,
   imagesMissingAltRule,
+  imagesDecorativeAltRule,
+  ...assetRules,
 ];
 
 /** Reglas agregadas que necesitan mirar todo el crawl. */
@@ -80,6 +84,13 @@ export const CRAWL_RULE_CATALOG = [
     severity: 'HIGH' as const,
     title: 'Enlace interno roto',
     description: 'Un enlace interno apunta a una URL que responde 4xx o 5xx.',
+  },
+  {
+    code: 'BROKEN_IMAGE',
+    severity: 'HIGH' as const,
+    title: 'Imagen rota en la página',
+    description:
+      'Una página HTML usa un <img> cuyo archivo responde 4xx/5xx o no se puede descargar.',
   },
   {
     code: 'NEAR_DUPLICATE_CONTENT',
