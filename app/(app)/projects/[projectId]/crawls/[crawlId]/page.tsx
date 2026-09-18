@@ -12,7 +12,11 @@ import {
   StatCard,
 } from '@/components/ui';
 import { LiveProgress } from '@/components/crawl/LiveProgress';
-import type { CrawlStats } from '@/src/analysis/analyze-crawl';
+import {
+  isLegacyStats,
+  requestedUrlsOf,
+  type CrawlStats,
+} from '@/src/analysis/analyze-crawl';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,6 +36,11 @@ export default async function CrawlOverviewPage({
 
   const stats = crawl.stats as unknown as CrawlStats | null;
   const base = `/projects/${projectId}/crawls/${crawlId}`;
+
+  // Bloques que sólo existen desde la clasificación de recursos.
+  const resources = stats?.resources;
+  const images = stats?.images;
+  const requestedUrls = stats ? requestedUrlsOf(stats) : 0;
 
   const duration =
     crawl.startedAt && crawl.completedAt
@@ -55,11 +64,23 @@ export default async function CrawlOverviewPage({
         />
       ) : (
         <>
+          {/* Los crawls anteriores a la clasificación de recursos no traen
+              `resources` ni `images`. No se midieron, así que sus paneles se
+              omiten en vez de enseñar ceros falsos. */}
+          {isLegacyStats(stats) ? (
+            <div className="card text-sm text-muted">
+              Este rastreo es anterior a la separación entre páginas y recursos:
+              sus cifras cuentan imágenes, CSS y JS como si fueran páginas.
+              Relanza el rastreo para obtener el inventario de recursos y la
+              auditoría de imágenes.
+            </div>
+          ) : null}
+
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <StatCard
               label="Páginas HTML"
               value={formatNumber(stats.totals.pages)}
-              hint={`${formatNumber(stats.totals.requestedUrls)} URLs solicitadas`}
+              hint={`${formatNumber(requestedUrls)} URLs solicitadas`}
               href={`${base}/pages?kind=pages`}
             />
             <StatCard
@@ -76,12 +97,14 @@ export default async function CrawlOverviewPage({
               hint="sólo páginas HTML"
               href={`${base}/pages?kind=pages&status=4xx`}
             />
-            <StatCard
-              label="Recursos descubiertos"
-              value={formatNumber(stats.resources.discovered)}
-              hint={`${formatNumber(stats.resources.images)} imágenes · ${formatNumber(stats.resources.broken)} rotos`}
-              href={`${base}/pages?kind=assets`}
-            />
+            {resources ? (
+              <StatCard
+                label="Recursos descubiertos"
+                value={formatNumber(resources.discovered)}
+                hint={`${formatNumber(resources.images)} imágenes · ${formatNumber(resources.broken)} rotos`}
+                href={`${base}/pages?kind=assets`}
+              />
+            ) : null}
             <StatCard
               label="Redirecciones"
               value={formatNumber(stats.totals.redirects)}
@@ -116,7 +139,7 @@ export default async function CrawlOverviewPage({
               <h3 className="mb-2 text-sm font-semibold">
                 Códigos de estado
                 <span className="ml-1 font-normal text-muted">
-                  · sobre {formatNumber(stats.totals.requestedUrls)} URLs solicitadas
+                  · sobre {formatNumber(requestedUrls)} URLs solicitadas
                 </span>
               </h3>
               {Object.entries(stats.statusDistribution).map(([bucket, count]) => (
@@ -124,7 +147,7 @@ export default async function CrawlOverviewPage({
                   key={bucket}
                   label={bucket}
                   value={count}
-                  total={stats.totals.requestedUrls}
+                  total={requestedUrls}
                   color={
                     bucket === '2xx'
                       ? 'bg-ok'
@@ -176,6 +199,7 @@ export default async function CrawlOverviewPage({
               ))}
             </div>
 
+            {resources ? (
             <div className="card">
               <h3 className="mb-2 text-sm font-semibold">
                 Recursos descubiertos
@@ -183,7 +207,7 @@ export default async function CrawlOverviewPage({
                   · no se auditan con reglas de páginas
                 </span>
               </h3>
-              {Object.entries(stats.resources.byType)
+              {Object.entries(resources.byType)
                 .filter(([type]) => type !== 'HTML_PAGE')
                 .sort((a, b) => b[1] - a[1])
                 .map(([type, count]) => (
@@ -191,54 +215,57 @@ export default async function CrawlOverviewPage({
                     key={type}
                     label={type}
                     value={count}
-                    total={stats.totals.requestedUrls}
+                    total={requestedUrls}
                     color="bg-panel2 border border-line"
                     href={`${base}/pages?resourceType=${type}`}
                   />
                 ))}
-              {stats.resources.discovered === 0 ? (
+              {resources.discovered === 0 ? (
                 <p className="text-sm text-muted">Sin recursos no-HTML.</p>
               ) : null}
             </div>
+            ) : null}
 
+            {images && resources ? (
             <div className="card">
               <h3 className="mb-2 text-sm font-semibold">
                 Imágenes en páginas HTML
                 <span className="ml-1 font-normal text-muted">
-                  · sobre {formatNumber(stats.images.elements)} elementos &lt;img&gt;
+                  · sobre {formatNumber(images.elements)} elementos &lt;img&gt;
                 </span>
               </h3>
-              {stats.images.elements === 0 ? (
+              {images.elements === 0 ? (
                 <p className="text-sm text-muted">Sin imágenes auditadas.</p>
               ) : (
                 <>
                   <BarRow
                     label="Sin atributo alt"
-                    value={stats.images.missingAlt}
-                    total={stats.images.elements}
+                    value={images.missingAlt}
+                    total={images.elements}
                     color="bg-bad"
                   />
                   <BarRow
                     label='Decorativas (alt="")'
-                    value={stats.images.decorativeAlt}
-                    total={stats.images.elements}
+                    value={images.decorativeAlt}
+                    total={images.elements}
                     color="bg-panel2 border border-line"
                   />
                   <BarRow
                     label="Con alt descriptivo"
-                    value={stats.images.describedAlt}
-                    total={stats.images.elements}
+                    value={images.describedAlt}
+                    total={images.elements}
                     color="bg-ok"
                   />
                   <p className="mt-2 text-xs text-muted">
-                    {formatNumber(stats.images.pagesWithMissingAlt)} páginas
-                    afectadas · {formatNumber(stats.resources.brokenImages)} de{' '}
-                    {formatNumber(stats.resources.images)} imágenes solicitadas
+                    {formatNumber(images.pagesWithMissingAlt)} páginas
+                    afectadas · {formatNumber(resources.brokenImages)} de{' '}
+                    {formatNumber(resources.images)} imágenes solicitadas
                     están rotas.
                   </p>
                 </>
               )}
             </div>
+            ) : null}
 
             <div className="card">
               <h3 className="mb-2 text-sm font-semibold">Top issues</h3>

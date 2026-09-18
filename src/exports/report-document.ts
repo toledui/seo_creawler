@@ -1,6 +1,6 @@
 import type { AuditReport } from '../ai/prompts/executive-report';
 import type { ComparisonReport } from '../ai/prompts/compare-reports';
-import type { CrawlStats } from '../analysis/analyze-crawl';
+import { requestedUrlsOf, type CrawlStats } from '../analysis/analyze-crawl';
 
 /**
  * Modelo neutro de documento.
@@ -347,6 +347,73 @@ function percent(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`;
 }
 
+/**
+ * Secciones de recursos e imágenes.
+ *
+ * Los rastreos anteriores a la clasificación de recursos no las traen: no
+ * se midieron, y sacar ceros sería mentir. En ese caso el informe lo dice.
+ */
+function resourceBlocks(stats: CrawlStats): Block[] {
+  const { resources, images } = stats;
+
+  if (!resources || !images) {
+    return [
+      { type: 'heading', level: 2, text: 'Recursos descubiertos' },
+      {
+        type: 'paragraph',
+        text: 'Este rastreo es anterior a la separación entre páginas y recursos, así que sus cifras cuentan imágenes, CSS y JS como si fueran páginas. Relanza el rastreo para obtener el inventario de recursos y la auditoría de imágenes.',
+      },
+    ];
+  }
+
+  return [
+    { type: 'heading', level: 2, text: 'Recursos descubiertos' },
+    {
+      type: 'table',
+      headers: ['Métrica', 'Valor'],
+      rows: [
+        ['Recursos (no HTML)', resources.discovered.toLocaleString('es-ES')],
+        ...Object.entries(resources.byType)
+          .filter(([type]) => type !== 'HTML_PAGE')
+          .sort((a, b) => b[1] - a[1])
+          .map(([type, count]): [string, string] => [
+            `· ${type}`,
+            count.toLocaleString('es-ES'),
+          ]),
+        ['Imágenes solicitadas', resources.images.toLocaleString('es-ES')],
+        [
+          'Imágenes rotas',
+          `${resources.brokenImages.toLocaleString('es-ES')} (${percent(resources.brokenImagesRatio)} de las imágenes solicitadas)`,
+        ],
+        ['Recursos rotos', resources.broken.toLocaleString('es-ES')],
+        ['Extensión ≠ Content-Type', resources.mimeMismatches.toLocaleString('es-ES')],
+      ],
+    },
+
+    { type: 'heading', level: 2, text: 'Imágenes dentro de páginas HTML' },
+    {
+      type: 'table',
+      headers: ['Métrica', 'Valor'],
+      rows: [
+        ['Elementos <img> auditados', images.elements.toLocaleString('es-ES')],
+        [
+          'Sin atributo alt',
+          `${images.missingAlt.toLocaleString('es-ES')} (${percent(images.missingAltRatio)} de los <img> auditados)`,
+        ],
+        [
+          'Decorativas (alt="")',
+          `${images.decorativeAlt.toLocaleString('es-ES')} · válido, sólo informativo`,
+        ],
+        ['Con alt descriptivo', images.describedAlt.toLocaleString('es-ES')],
+        [
+          'Páginas afectadas por imágenes sin alt',
+          images.pagesWithMissingAlt.toLocaleString('es-ES'),
+        ],
+      ],
+    },
+  ];
+}
+
 export function crawlDocument(
   stats: CrawlStats,
   meta: CrawlMeta,
@@ -390,7 +457,10 @@ export function crawlDocument(
       rows: [
         ['URL de inicio', meta.startUrl],
         ['Páginas HTML analizadas', totals.pages.toLocaleString('es-ES')],
-        ['URLs solicitadas (con recursos)', totals.requestedUrls.toLocaleString('es-ES')],
+        [
+          'URLs solicitadas (con recursos)',
+          requestedUrlsOf(stats).toLocaleString('es-ES'),
+        ],
         ['Indexables', totals.indexable.toLocaleString('es-ES')],
         ['No indexables', totals.nonIndexable.toLocaleString('es-ES')],
         ['Errores', totals.errors.toLocaleString('es-ES')],
@@ -404,55 +474,7 @@ export function crawlDocument(
       ],
     },
 
-    // Los recursos van en su propia sección: no son páginas y no se
-    // auditan con reglas de metadatos HTML.
-    { type: 'heading', level: 2, text: 'Recursos descubiertos' },
-    {
-      type: 'table',
-      headers: ['Métrica', 'Valor'],
-      rows: [
-        ['Recursos (no HTML)', stats.resources.discovered.toLocaleString('es-ES')],
-        ...Object.entries(stats.resources.byType)
-          .filter(([type]) => type !== 'HTML_PAGE')
-          .sort((a, b) => b[1] - a[1])
-          .map(([type, count]): [string, string] => [
-            `· ${type}`,
-            count.toLocaleString('es-ES'),
-          ]),
-        ['Imágenes solicitadas', stats.resources.images.toLocaleString('es-ES')],
-        [
-          'Imágenes rotas',
-          `${stats.resources.brokenImages.toLocaleString('es-ES')} (${percent(stats.resources.brokenImagesRatio)} de las imágenes solicitadas)`,
-        ],
-        ['Recursos rotos', stats.resources.broken.toLocaleString('es-ES')],
-        [
-          'Extensión ≠ Content-Type',
-          stats.resources.mimeMismatches.toLocaleString('es-ES'),
-        ],
-      ],
-    },
-
-    { type: 'heading', level: 2, text: 'Imágenes dentro de páginas HTML' },
-    {
-      type: 'table',
-      headers: ['Métrica', 'Valor'],
-      rows: [
-        ['Elementos <img> auditados', stats.images.elements.toLocaleString('es-ES')],
-        [
-          'Sin atributo alt',
-          `${stats.images.missingAlt.toLocaleString('es-ES')} (${percent(stats.images.missingAltRatio)} de los <img> auditados)`,
-        ],
-        [
-          'Decorativas (alt="")',
-          `${stats.images.decorativeAlt.toLocaleString('es-ES')} · válido, sólo informativo`,
-        ],
-        ['Con alt descriptivo', stats.images.describedAlt.toLocaleString('es-ES')],
-        [
-          'Páginas afectadas por imágenes sin alt',
-          stats.images.pagesWithMissingAlt.toLocaleString('es-ES'),
-        ],
-      ],
-    },
+    ...resourceBlocks(stats),
   );
 
   const distribution = (title: string, data: Record<string, number>) => {

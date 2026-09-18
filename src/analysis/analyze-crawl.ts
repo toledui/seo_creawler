@@ -18,8 +18,12 @@ export type CrawlStats = {
      * PDFs: ése es el denominador correcto de todo lo on-page.
      */
     pages: number;
-    /** Todas las URLs que se pidieron, assets incluidos. */
-    requestedUrls: number;
+    /**
+     * Todas las URLs que se pidieron, assets incluidos.
+     * Opcional: los crawls anteriores a la clasificación de recursos no lo
+     * traen, y ahí `pages` ya contaba todas las URLs.
+     */
+    requestedUrls?: number;
     /** Indexables sobre el total de páginas HTML. */
     indexable: number;
     nonIndexable: number;
@@ -34,8 +38,12 @@ export type CrawlStats = {
     averageResponseTime: number;
     averageWordCount: number;
   };
-  /** Todo lo que no es un documento HTML. */
-  resources: {
+  /**
+   * Todo lo que no es un documento HTML.
+   * Ausente en crawls anteriores a la clasificación: no se midió, que no es
+   * lo mismo que medir cero. Hay que re-rastrear para tenerlo.
+   */
+  resources?: {
     /** URLs solicitadas que no son páginas HTML. */
     discovered: number;
     /** Recuento por `resourceType`. */
@@ -51,8 +59,11 @@ export type CrawlStats = {
     /** Discrepancias entre extensión y Content-Type. */
     mimeMismatches: number;
   };
-  /** Auditoría de los elementos <img> hallados dentro de páginas HTML. */
-  images: {
+  /**
+   * Auditoría de los elementos <img> hallados dentro de páginas HTML.
+   * Ausente en crawls anteriores, por el mismo motivo que `resources`.
+   */
+  images?: {
     /** Total de elementos <img> auditados. */
     elements: number;
     /** Sin atributo alt (error). */
@@ -90,6 +101,24 @@ export type CrawlStats = {
   };
   computedAt: string;
 };
+
+/**
+ * URLs solicitadas, tolerando estadísticas antiguas.
+ *
+ * Antes de la clasificación de recursos, `totals.pages` contaba todas las
+ * URLs pedidas (assets incluidos), así que es su equivalente exacto.
+ */
+export function requestedUrlsOf(stats: CrawlStats): number {
+  return stats.totals.requestedUrls ?? stats.totals.pages;
+}
+
+/**
+ * true si estas estadísticas se calcularon antes de separar páginas de
+ * recursos. La interfaz lo usa para no enseñar ceros que no se midieron.
+ */
+export function isLegacyStats(stats: CrawlStats): boolean {
+  return stats.resources == null || stats.images == null;
+}
 
 const BATCH = 500;
 
